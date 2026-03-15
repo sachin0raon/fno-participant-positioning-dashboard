@@ -35,4 +35,4 @@ EXPOSE 8000
 ENV PYTHONUNBUFFERED=1
 
 # Run the backend using uvicorn module (bind to 0.0.0.0 for Docker)
-CMD ["python", "-m", "uvicorn", "fno_dashboard:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "fno_dashboard:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]

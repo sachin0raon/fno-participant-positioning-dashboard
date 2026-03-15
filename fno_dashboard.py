@@ -7,7 +7,8 @@ Data source: National Stock Exchange of India (NSE)
 import hashlib
 import random
 import logging
-import requests
+import asyncio
+import os
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
@@ -17,19 +18,61 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
-import os
+from pydantic import BaseModel
+from dotenv import load_dotenv
+from telegram import Update, BotCommand
+from telegram.ext import Application, CommandHandler, ContextTypes
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from contextlib import asynccontextmanager
 
 
 # ─── Logging ────────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+# ─── FastAPI App ────────────────────────────────────────────────────
+# ─── Lifespan ────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage lifecycle of Telegram bot and Scheduler"""
+    global telegram_app, scheduler
+    if TELEGRAM_ENABLED:
+        await setup_telegram_bot()
+        if telegram_app:
+            await telegram_app.initialize()
+            await telegram_app.start()
+            # Start polling in background correctly for FastAPI
+            await telegram_app.updater.start_polling(drop_pending_updates=True)
+            logger.info("Telegram bot polling started")
+            if scheduler:
+                scheduler.start()
+                logger.info("Scheduler started for daily dashboard")
+    
+    yield
+    
+    # Cleanup
+    if scheduler and scheduler.running:
+        scheduler.shutdown()
+    if telegram_app:
+        if telegram_app.updater and telegram_app.updater.running:
+            await telegram_app.updater.stop()
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+    logger.info("Telegram bot stopped")
+
 
 # ─── FastAPI App ────────────────────────────────────────────────────
 app = FastAPI(
     title="F&O Dashboard API",
     description="NSE India Futures & Options Participant Positioning Data",
     version="2.0.0",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -395,6 +438,15 @@ class SentimentAnalyzer:
 fetcher = NSEFNODataFetcher()
 analyzer = SentimentAnalyzer()
 
+# ─── Telegram Bot Configuration ─────────────────────────────────────
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or None
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip() or None
+TELEGRAM_CRON_SCHEDULE = os.getenv("TELEGRAM_CRON_SCHEDULE", "0 16 * * 1-5")
+TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+
+telegram_app: Optional[Application] = None
+scheduler: Optional[AsyncIOScheduler] = None
+
 
 # ─── API Routes ────────────────────────────────────────────────────
 @app.get("/api/health")
@@ -421,21 +473,8 @@ async def get_available_dates():
     return dates
 
 
-@app.get("/api/fno-data", response_model=DashboardResponse)
-async def get_fno_data(
-    date: str = Query(..., description="Date in DD-MM-YYYY format"),
-    mock: bool = Query(False, description="Force mock data"),
-):
-    """Fetch F&O participant data for a given trading date"""
-    # Validate date format
-    try:
-        parsed_date = datetime.strptime(date, "%d-%m-%Y")
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid date format. Use DD-MM-YYYY.",
-        )
-
+async def _fetch_and_analyze_data(date: str, mock: bool = False) -> Optional[DashboardResponse]:
+    """Internal helper to fetch data, analyze it and format response"""
     is_mock = mock
     data: Optional[List[ParticipantData]] = None
 
@@ -448,22 +487,17 @@ async def get_fno_data(
     else:
         data = fetcher.get_mock_data(date)
 
+    if not data:
+        return None
+
     # Analyze all participants
     participants = [analyzer.analyze_participant(d) for d in data]
 
     # Market summary
-    bull_count: int = 0
-    bear_count: int = 0
-    neutral_count: int = 0
+    bull_count = sum(1 for p in participants if p.overall_sentiment == "Bullish")
+    bear_count = sum(1 for p in participants if p.overall_sentiment == "Bearish")
+    neutral_count = len(participants) - bull_count - bear_count
     
-    for p in participants:
-        if p.overall_sentiment == "Bullish":
-            bull_count += 1
-        elif p.overall_sentiment == "Bearish":
-            bear_count += 1
-        else:
-            neutral_count += 1
-
     sorted_by_score = sorted(participants, key=lambda x: x.sentiment_score, reverse=True)
     most_bullish = sorted_by_score[0].category if sorted_by_score else "N/A"
     most_bearish = sorted_by_score[-1].category if sorted_by_score else "N/A"
@@ -493,6 +527,341 @@ async def get_fno_data(
         ),
         is_mock_data=is_mock,
     )
+
+
+@app.get("/api/fno-data", response_model=DashboardResponse)
+async def get_fno_data(
+    date: str = Query(..., description="Date in DD-MM-YYYY format"),
+    mock: bool = Query(False, description="Force mock data"),
+):
+    """Fetch F&O participant data for a given trading date"""
+    # Validate date format
+    try:
+        datetime.strptime(date, "%d-%m-%Y")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid date format. Use DD-MM-YYYY.",
+        )
+
+    response = await _fetch_and_analyze_data(date, mock)
+    if not response:
+        raise HTTPException(status_code=404, detail=f"No data available for {date}")
+    return response
+
+
+# ─── Telegram Bot Functions ──────────────────────────────────────────
+
+def format_compact_message(data: DashboardResponse) -> str:
+    """Generate a compact formatted message for Telegram"""
+    lines = []
+    lines.append(f"📊 *F&O Dashboard - {data.date}*")
+    if data.is_mock_data:
+        lines.append("⚠️ _Using Mock Data_")
+    lines.append("")
+
+    # Market summary
+    summary = data.market_summary
+    lines.append(f"🌐 *Overall Sentiment:* {summary.overall_sentiment}")
+    lines.append(f"🐂 {summary.bullish_count} Bullish | 🐻 {summary.bearish_count} Bearish | ➖ {summary.neutral_count} Neutral")
+    lines.append(f"🔥 *Top Bull:* {summary.most_bullish} | ❄️ *Top Bear:* {summary.most_bearish}")
+    lines.append("")
+
+    # Participants
+    lines.append("*Position Analysis:*")
+    for p in data.participants:
+        emoji = "🟢" if p.overall_sentiment == "Bullish" else "🔴" if p.overall_sentiment == "Bearish" else "⚪"
+        fut = f"F:{p.futures.net:+d}"
+        ce = f"CE:{p.calls.net:+d}"
+        pe = f"PE:{p.puts.net:+d}"
+        lines.append(f"{emoji} *{p.symbol}*: {fut} | {ce} | {pe}")
+
+    lines.append("")
+    lines.append(f"🏛️ *FII:* {summary.fii_sentiment} | *DII:* {summary.dii_sentiment}")
+
+    return "\n".join(lines)
+
+
+async def get_dashboard_data(date: str, mock: bool = False) -> Optional[DashboardResponse]:
+    """Fetch dashboard data for a given date (Wrapper for bot)"""
+    return await _fetch_and_analyze_data(date, mock)
+
+
+async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bool = False, header: str = ""):
+    """Send dashboard report to a specific chat"""
+    if not telegram_app:
+        logger.warning("Telegram app not initialized")
+        return
+
+    target_date = date or datetime.now().strftime("%d-%m-%Y")
+
+    # Weekend check
+    try:
+        dt = datetime.strptime(target_date, "%d-%m-%Y")
+        if dt.weekday() >= 5:
+            if silent_skip:
+                logger.info(f"Silently skipping weekend: {target_date}")
+                return
+            
+            await telegram_app.bot.send_message(
+                chat_id=chat_id,
+                text=f"🍹 *Market is Closed* ({target_date})\n\nPositions are only updated on trading days (Monday - Friday).",
+                parse_mode="Markdown"
+            )
+            return
+    except ValueError:
+        pass
+
+    logger.info(f"Sending dashboard for {target_date}")
+    data = await get_dashboard_data(target_date)
+
+    if data:
+        message = header + format_compact_message(data)
+        try:
+            await telegram_app.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
+            logger.info(f"Dashboard sent for {target_date}")
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}")
+    else:
+        try:
+            await telegram_app.bot.send_message(chat_id=chat_id, text=f"{header}No data available for {target_date}")
+        except Exception as e:
+            logger.error(f"Failed to send error message: {e}")
+
+
+# ─── Telegram Bot Handlers ────────────────────────────────────────────
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command"""
+    if TELEGRAM_CHAT_ID and str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
+        logger.warning(f"Unauthorized access from {update.message.chat_id}")
+        return
+
+    await update.message.reply_text(
+        "📊 *F&O Dashboard Bot*\n\n"
+        "Available commands:\n"
+        "/today - Get today's report\n"
+        "/date DD-MM-YYYY - Get report for specific date\n"
+        "/cron - Show/update schedule\n"
+        "/help - Show this help message",
+        parse_mode="Markdown"
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /help command"""
+    if TELEGRAM_CHAT_ID and str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    await update.message.reply_text(
+        "📊 *F&O Dashboard Commands*\n\n"
+        "*Commands:*\n"
+        "/today - Get today's F&O report\n"
+        "/date `DD-MM-YYYY` - Get report for a specific date\n"
+        "Example: `/date 14-03-2026`\n\n"
+        "*Scheduler:*\n"
+        "/cron - Show current schedule\n"
+        "/cron `<expression>` - Update schedule\n"
+        "Example: `/cron */5 * * * *` (every 5 min)\n"
+        "Example: `/cron 0 9 * * 1-5` (9 AM weekdays)\n\n"
+        "Format: `minute hour day month day_of_week`",
+        parse_mode="Markdown"
+    )
+
+
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /today command"""
+    if TELEGRAM_CHAT_ID and str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    now = datetime.now()
+    if now.weekday() >= 5:
+        # Weekend: Fetch last trading day
+        last_trading_day = fetcher.get_previous_trading_day(now.strftime("%d-%m-%Y"))
+        header = f"🍹 *Market is Closed today.*\nShowing latest report ({last_trading_day}):\n\n"
+        await send_dashboard_message(str(update.message.chat_id), last_trading_day, header=header)
+    else:
+        await send_dashboard_message(str(update.message.chat_id), now.strftime("%d-%m-%Y"))
+
+
+async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /date command with argument"""
+    if TELEGRAM_CHAT_ID and str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /date DD-MM-YYYY\nExample: /date 14-03-2026")
+        return
+
+    date_arg = context.args[0]
+    # Validate date format
+    try:
+        dt_arg = datetime.strptime(date_arg, "%d-%m-%Y")
+        if dt_arg.weekday() >= 5:
+            await update.message.reply_text(f"❌ *{date_arg}* was a weekend. Markets are closed on Saturdays and Sundays.", parse_mode="Markdown")
+            return
+    except ValueError:
+        await update.message.reply_text("Invalid date format. Use DD-MM-YYYY\nExample: /date 14-03-2026")
+        return
+
+    data = await get_dashboard_data(date_arg)
+    if data:
+        message = format_compact_message(data)
+        await update.message.reply_text(message, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"No data available for {date_arg}")
+
+
+async def cron_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /cron command to update scheduler schedule"""
+    if TELEGRAM_CHAT_ID and str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    global scheduler, TELEGRAM_CRON_SCHEDULE
+
+    if not context.args:
+        current = TELEGRAM_CRON_SCHEDULE
+        await update.message.reply_text(
+            f"📅 *Current Schedule:* `{current}`\n\n"
+            "Usage: `/cron <cron_expression>`\n"
+            "Example: `/cron */5 * * * *` (every 5 minutes)\n"
+            "Example: `/cron 0 9 * * 1-5` (9 AM weekdays)\n\n"
+            "Format: `minute hour day month day_of_week`",
+            parse_mode="Markdown"
+        )
+        return
+
+    cron_arg = " ".join(context.args)
+
+    # Validate the cron expression
+    parsed = parse_cron_expression(cron_arg)
+    if not parsed:
+        await update.message.reply_text("Invalid cron expression. Use: minute hour day month day_of_week")
+        return
+
+    # Reschedule the job
+    old_schedule = TELEGRAM_CRON_SCHEDULE
+    TELEGRAM_CRON_SCHEDULE = cron_arg
+
+    try:
+        # Remove existing job if it exists
+        try:
+            scheduler.remove_job("daily_dashboard")
+        except Exception:
+            pass
+
+        scheduler.add_job(
+            send_dashboard_message,
+            "cron",
+            args=[TELEGRAM_CHAT_ID],
+            kwargs={"silent_skip": True},
+            **parsed,
+            id="daily_dashboard"
+        )
+        await update.message.reply_text(
+            f"✅ *Schedule updated!*\n\n"
+            f"Old: `{old_schedule}`\n"
+            f"New: `{cron_arg}`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        TELEGRAM_CRON_SCHEDULE = old_schedule
+        await update.message.reply_text(f"❌ Failed to update scheduler: {e}")
+
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors"""
+    from telegram.error import RetryAfter
+    if isinstance(context.error, RetryAfter):
+        logger.warning(f"Flood limit hit! Need to wait {context.error.retry_after} seconds.")
+        # Don't spam logs with the same error if polling
+        return
+    logger.error(f"Update {update} caused error {context.error}")
+
+
+async def setup_telegram_bot():
+    """Initialize and configure the Telegram bot"""
+    global telegram_app, scheduler
+
+    if not TELEGRAM_ENABLED:
+        logger.info("Telegram bot disabled: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
+        return
+
+    logger.info(f"Initializing Telegram bot with token: {TELEGRAM_BOT_TOKEN[:5]}...")
+
+    # Create application
+    telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Register handlers
+    telegram_app.add_handler(CommandHandler("start", start_command))
+    telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("today", today_command))
+    telegram_app.add_handler(CommandHandler("date", date_command))
+    telegram_app.add_handler(CommandHandler("cron", cron_command))
+    telegram_app.add_error_handler(error_handler)
+
+    # Set command list for Telegram UI
+    commands = [
+        BotCommand("today", "Get today's F&O participant report"),
+        BotCommand("date", "Get report for specific date (DD-MM-YYYY)"),
+        BotCommand("cron", "Show or update the automated schedule"),
+        BotCommand("help", "Show all available commands"),
+        BotCommand("start", "Start the bot and show welcome message"),
+    ]
+    await telegram_app.bot.set_my_commands(commands)
+
+    # Setup scheduler
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        send_dashboard_message,
+        "cron",
+        args=[TELEGRAM_CHAT_ID],
+        kwargs={"silent_skip": True},
+        **parse_cron_expression(TELEGRAM_CRON_SCHEDULE),
+        id="daily_dashboard"
+    )
+
+    logger.info(f"Telegram bot - {await telegram_app.bot.getMe()} initialized. Cron schedule: {TELEGRAM_CRON_SCHEDULE}")
+
+
+def parse_cron_expression(cron_str: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse a 5-part cron expression string into APScheduler kwargs.
+    Returns None if expression is invalid.
+    """
+    parts = cron_str.split()
+    if len(parts) != 5:
+        return None
+
+    minute, hour, day, month, dow = parts
+    kwargs = {}
+
+    # Map fields. APScheduler's CronTrigger handles strings like '*/5' or '1-5' natively.
+    if minute != "*": kwargs["minute"] = minute
+    if hour != "*": kwargs["hour"] = hour
+    if day != "*": kwargs["day"] = day
+    if month != "*": kwargs["month"] = month
+    if dow != "*": kwargs["day_of_week"] = dow
+
+    return kwargs
+
+
+# ─── FastAPI Events ───────────────────────────────────────────────────
+
+
+# FastAPI startup/shutdown now handled via lifespan context manager
+
+
+# ─── API Routes for Telegram ──────────────────────────────────────────
+
+@app.get("/api/telegram/test")
+async def test_telegram():
+    """Test endpoint to send a message via Telegram"""
+    if not TELEGRAM_ENABLED:
+        return {"error": "Telegram not configured"}
+    today = datetime.now().strftime("%d-%m-%Y")
+    await send_dashboard_message(TELEGRAM_CHAT_ID, today)
+    return {"status": "Message sent"}
 
 
 # ─── Static File Serving (Frontend) ──────────────────────────────────
