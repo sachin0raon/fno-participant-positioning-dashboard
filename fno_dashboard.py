@@ -41,29 +41,27 @@ load_dotenv()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage lifecycle of Telegram bot and Scheduler"""
-    global telegram_app, scheduler
     if TELEGRAM_ENABLED:
-        await setup_telegram_bot()
-        if telegram_app:
-            await telegram_app.initialize()
-            await telegram_app.start()
-            # Start polling in background correctly for FastAPI
-            await telegram_app.updater.start_polling(drop_pending_updates=True)
+        await setup_telegram_bot(app)
+        if hasattr(app.state, "telegram_app"):
+            await app.state.telegram_app.initialize()
+            await app.state.telegram_app.start()
+            await app.state.telegram_app.updater.start_polling(drop_pending_updates=True)
             logger.info("Telegram bot polling started")
-            if scheduler:
-                scheduler.start()
+            if hasattr(app.state, "scheduler"):
+                app.state.scheduler.start()
                 logger.info("Scheduler started for daily dashboard")
     
     yield
     
     # Cleanup
-    if scheduler and scheduler.running:
-        scheduler.shutdown()
-    if telegram_app:
-        if telegram_app.updater and telegram_app.updater.running:
-            await telegram_app.updater.stop()
-        await telegram_app.stop()
-        await telegram_app.shutdown()
+    if hasattr(app.state, "scheduler") and app.state.scheduler.running:
+        app.state.scheduler.shutdown()
+    if hasattr(app.state, "telegram_app"):
+        if app.state.telegram_app.updater and app.state.telegram_app.updater.running:
+            await app.state.telegram_app.updater.stop()
+        await app.state.telegram_app.stop()
+        await app.state.telegram_app.shutdown()
     logger.info("Telegram bot stopped")
 
 
@@ -444,9 +442,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip() or None
 TELEGRAM_CRON_SCHEDULE = os.getenv("TELEGRAM_CRON_SCHEDULE", "0 16 * * 1-5")
 TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
 
-telegram_app: Optional[Application] = None
-scheduler: Optional[AsyncIOScheduler] = None
-
 
 # ─── API Routes ────────────────────────────────────────────────────
 @app.get("/api/health")
@@ -582,14 +577,9 @@ def format_compact_message(data: DashboardResponse) -> str:
     return "\n".join(lines)
 
 
-async def get_dashboard_data(date: str, mock: bool = False) -> Optional[DashboardResponse]:
-    """Fetch dashboard data for a given date (Wrapper for bot)"""
-    return await _fetch_and_analyze_data(date, mock)
-
-
 async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bool = False, header: str = ""):
     """Send dashboard report to a specific chat"""
-    if not telegram_app:
+    if not hasattr(app.state, "telegram_app"):
         logger.warning("Telegram app not initialized")
         return
 
@@ -603,28 +593,28 @@ async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bo
                 logger.info(f"Silently skipping weekend: {target_date}")
                 return
             
-            await telegram_app.bot.send_message(
+            await app.state.telegram_app.bot.send_message(
                 chat_id=chat_id,
                 text=f"🍹 *Market is Closed* ({target_date})\n\nPositions are only updated on trading days (Monday - Friday).",
                 parse_mode="Markdown"
             )
             return
-    except ValueError:
+    except Exception:
         pass
 
     logger.info(f"Sending dashboard for {target_date}")
-    data = await get_dashboard_data(target_date)
+    data = await _fetch_and_analyze_data(target_date)
 
     if data:
         message = header + format_compact_message(data)
         try:
-            await telegram_app.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
+            await app.state.telegram_app.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
             logger.info(f"Dashboard sent for {target_date}")
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
     else:
         try:
-            await telegram_app.bot.send_message(chat_id=chat_id, text=f"{header}No data available for {target_date}")
+            await app.state.telegram_app.bot.send_message(chat_id=chat_id, text=f"{header}No data available for {target_date}")
         except Exception as e:
             logger.error(f"Failed to send error message: {e}")
 
@@ -704,7 +694,7 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Invalid date format. Use DD-MM-YYYY\nExample: /date 14-03-2026")
         return
 
-    data = await get_dashboard_data(date_arg)
+    data = await _fetch_and_analyze_data(date_arg)
     if data:
         message = format_compact_message(data)
         await update.message.reply_text(message, parse_mode="Markdown")
@@ -717,7 +707,7 @@ async def cron_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if TELEGRAM_CHAT_ID and str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
         return
 
-    global scheduler, TELEGRAM_CRON_SCHEDULE
+    global TELEGRAM_CRON_SCHEDULE
 
     if not context.args:
         current = TELEGRAM_CRON_SCHEDULE
@@ -746,11 +736,11 @@ async def cron_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Remove existing job if it exists
         try:
-            scheduler.remove_job("daily_dashboard")
+            app.state.scheduler.remove_job("daily_dashboard")
         except Exception:
             pass
 
-        scheduler.add_job(
+        app.state.scheduler.add_job(
             send_dashboard_message,
             "cron",
             args=[TELEGRAM_CHAT_ID],
@@ -779,10 +769,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
 
 
-async def setup_telegram_bot():
+async def setup_telegram_bot(fastapi_app: FastAPI):
     """Initialize and configure the Telegram bot"""
-    global telegram_app, scheduler
-
     if not TELEGRAM_ENABLED:
         logger.info("Telegram bot disabled: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
         return
@@ -791,6 +779,7 @@ async def setup_telegram_bot():
 
     # Create application
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    fastapi_app.state.telegram_app = telegram_app
 
     # Register handlers
     telegram_app.add_handler(CommandHandler("start", start_command))
@@ -811,17 +800,24 @@ async def setup_telegram_bot():
     await telegram_app.bot.set_my_commands(commands)
 
     # Setup scheduler
+    parsed_cron = parse_cron_expression(TELEGRAM_CRON_SCHEDULE)
+    if not parsed_cron:
+        logger.error(f"Invalid default cron schedule: {TELEGRAM_CRON_SCHEDULE}. Task NOT scheduled.")
+        return
+
     scheduler = AsyncIOScheduler()
+    fastapi_app.state.scheduler = scheduler
+    
     scheduler.add_job(
         send_dashboard_message,
         "cron",
         args=[TELEGRAM_CHAT_ID],
         kwargs={"silent_skip": True},
-        **parse_cron_expression(TELEGRAM_CRON_SCHEDULE),
+        **parsed_cron,
         id="daily_dashboard"
     )
 
-    logger.info(f"Telegram bot - {await telegram_app.bot.getMe()} initialized. Cron schedule: {TELEGRAM_CRON_SCHEDULE}")
+    logger.info(f"Telegram bot initialized. Schedule: {TELEGRAM_CRON_SCHEDULE}")
 
 
 def parse_cron_expression(cron_str: str) -> Optional[Dict[str, Any]]:
@@ -857,7 +853,7 @@ def parse_cron_expression(cron_str: str) -> Optional[Dict[str, Any]]:
 @app.get("/api/telegram/test")
 async def test_telegram():
     """Test endpoint to send a message via Telegram"""
-    if not TELEGRAM_ENABLED:
+    if not TELEGRAM_ENABLED or not TELEGRAM_CHAT_ID:
         return {"error": "Telegram not configured"}
     today = datetime.now().strftime("%d-%m-%Y")
     await send_dashboard_message(TELEGRAM_CHAT_ID, today)
