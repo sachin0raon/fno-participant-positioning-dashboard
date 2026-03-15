@@ -1,7 +1,8 @@
+import { useMemo } from 'react'
 import { motion, Variants } from 'framer-motion'
 import { ArrowUpRight, ArrowDownRight, Table2 } from 'lucide-react'
-import { cn, formatNumber, toPositionRows, PARTICIPANT_META, getTrendIcon } from '@/lib/utils'
-import type { ParticipantAnalysis, PositionRow, ParticipantSymbol } from '@/types'
+import { cn, formatNumber, toPositionRows, PARTICIPANT_META } from '@/lib/utils'
+import type { ParticipantAnalysis, ParticipantSymbol } from '@/types'
 
 interface PositioningTableProps {
     participants: ParticipantAnalysis[]
@@ -17,7 +18,7 @@ const rowVariants: Variants = {
 }
 
 export function PositioningTable({ participants }: PositioningTableProps) {
-    const rows = toPositionRows(participants)
+    const rows = useMemo(() => toPositionRows(participants), [participants])
 
     return (
         <div className="rounded-2xl border border-white/[0.06] glass overflow-hidden">

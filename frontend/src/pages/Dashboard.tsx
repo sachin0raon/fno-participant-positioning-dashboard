@@ -27,7 +27,6 @@ export default function Dashboard() {
     const { data: dates } = useAvailableDates()
     const [selectedDate, setSelectedDate] = useState('')
 
-    // Auto-select the first available date
     const effectiveDate = selectedDate || dates?.[0]?.value || ''
 
     const {

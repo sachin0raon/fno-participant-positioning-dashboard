@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as Tabs from '@radix-ui/react-tabs'
 import { TrendingUp, Phone, Shield, ArrowUpRight, ArrowDownRight } from 'lucide-react'
-import { cn, formatCompact, PARTICIPANT_META, getSentimentColor } from '@/lib/utils'
+import { cn, formatCompact, PARTICIPANT_META } from '@/lib/utils'
 import type { ParticipantAnalysis, ParticipantSymbol } from '@/types'
 
 interface ParticipantCardsProps {

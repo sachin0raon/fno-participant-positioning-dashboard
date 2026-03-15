@@ -1,10 +1,3 @@
-/* ─── Discriminated UI State ─── */
-export type FetchState<T> =
-  | { status: 'idle' }
-  | { status: 'loading' }
-  | { status: 'success'; data: T }
-  | { status: 'error'; error: Error }
-
 /* ─── API Response Models ─── */
 export interface InstrumentAnalysis {
   net: number
