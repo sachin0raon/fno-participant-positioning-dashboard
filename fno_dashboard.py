@@ -150,8 +150,6 @@ class DashboardResponse(BaseModel):
     date: str
     participants: List[ParticipantAnalysis]
     market_summary: MarketSummary
-    is_mock_data: bool
-
 
 class DateOption(BaseModel):
     value: str
@@ -256,54 +254,6 @@ class NSEFNODataFetcher:
                 ))
         return change_list
 
-    def get_mock_data(self, date: str = "") -> List[ParticipantData]:
-        """Generate deterministic mock data based on date for demonstration"""
-        seed_str = date if date else "default_seed"
-        seed = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16)
-        rng = random.Random(seed)
-
-        def rand_contracts(base: int, spread: int) -> int:
-            return base + rng.randint(-spread, spread)
-
-        mock_data = [
-            ParticipantData(
-                category="FII",
-                futures_long=rand_contracts(125000, 15000),
-                futures_short=rand_contracts(118000, 15000),
-                calls_bought=rand_contracts(45000, 8000),
-                calls_sold=rand_contracts(52000, 8000),
-                puts_bought=rand_contracts(38000, 6000),
-                puts_sold=rand_contracts(31000, 6000),
-            ),
-            ParticipantData(
-                category="DII",
-                futures_long=rand_contracts(45000, 8000),
-                futures_short=rand_contracts(38000, 8000),
-                calls_bought=rand_contracts(15000, 4000),
-                calls_sold=rand_contracts(12000, 4000),
-                puts_bought=rand_contracts(22000, 5000),
-                puts_sold=rand_contracts(18000, 5000),
-            ),
-            ParticipantData(
-                category="PRO",
-                futures_long=rand_contracts(89000, 12000),
-                futures_short=rand_contracts(95000, 12000),
-                calls_bought=rand_contracts(67000, 10000),
-                calls_sold=rand_contracts(72000, 10000),
-                puts_bought=rand_contracts(54000, 8000),
-                puts_sold=rand_contracts(49000, 8000),
-            ),
-            ParticipantData(
-                category="CLIENT",
-                futures_long=rand_contracts(67000, 10000),
-                futures_short=rand_contracts(72000, 10000),
-                calls_bought=rand_contracts(82000, 12000),
-                calls_sold=rand_contracts(78000, 12000),
-                puts_bought=rand_contracts(61000, 9000),
-                puts_sold=rand_contracts(65000, 9000),
-            ),
-        ]
-        return mock_data
 
 
 # ─── Sentiment Analyzer ───────────────────────────────────────────
@@ -468,19 +418,9 @@ async def get_available_dates():
     return dates
 
 
-async def _fetch_and_analyze_data(date: str, mock: bool = False) -> Optional[DashboardResponse]:
+async def _fetch_and_analyze_data(date: str) -> Optional[DashboardResponse]:
     """Internal helper to fetch data, analyze it and format response"""
-    is_mock = mock
-    data: Optional[List[ParticipantData]] = None
-
-    if not mock:
-        data = fetcher.get_participant_oi_data(date)
-        if data is None:
-            logger.info(f"Live data unavailable for {date}, falling back to mock data")
-            data = fetcher.get_mock_data(date)
-            is_mock = True
-    else:
-        data = fetcher.get_mock_data(date)
+    data = fetcher.get_participant_oi_data(date)
 
     if not data:
         return None
@@ -519,15 +459,13 @@ async def _fetch_and_analyze_data(date: str, mock: bool = False) -> Optional[Das
             most_bearish=most_bearish,
             fii_sentiment=fii.overall_sentiment if fii else "N/A",
             dii_sentiment=dii.overall_sentiment if dii else "N/A",
-        ),
-        is_mock_data=is_mock,
+        )
     )
 
 
 @app.get("/api/fno-data", response_model=DashboardResponse)
 async def get_fno_data(
     date: str = Query(..., description="Date in DD-MM-YYYY format"),
-    mock: bool = Query(False, description="Force mock data"),
 ):
     """Fetch F&O participant data for a given trading date"""
     # Validate date format
@@ -539,7 +477,7 @@ async def get_fno_data(
             detail="Invalid date format. Use DD-MM-YYYY.",
         )
 
-    response = await _fetch_and_analyze_data(date, mock)
+    response = await _fetch_and_analyze_data(date)
     if not response:
         raise HTTPException(status_code=404, detail=f"No data available for {date}")
     return response
@@ -551,8 +489,6 @@ def format_compact_message(data: DashboardResponse) -> str:
     """Generate a compact formatted message for Telegram"""
     lines = []
     lines.append(f"📊 *F&O Dashboard - {data.date}*")
-    if data.is_mock_data:
-        lines.append("⚠️ _Using Mock Data_")
     lines.append("")
 
     # Market summary
@@ -614,7 +550,10 @@ async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bo
             logger.error(f"Failed to send message: {e}")
     else:
         try:
-            await app.state.telegram_app.bot.send_message(chat_id=chat_id, text=f"{header}No data available for {target_date}")
+            # Inform user that data fetch failed for the day
+            failure_msg = f"{header}🔴 *Data Unavailable*\n\nUnable to fetch F&O positioning data for *{target_date}* from NSE India at this time. This usually happens if the exchange hasn't released the data yet or there's a connectivity issue."
+            await app.state.telegram_app.bot.send_message(chat_id=chat_id, text=failure_msg, parse_mode="Markdown")
+            logger.warning(f"Sent failure notification for {target_date}")
         except Exception as e:
             logger.error(f"Failed to send error message: {e}")
 

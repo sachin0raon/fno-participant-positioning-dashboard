@@ -41,7 +41,6 @@ export interface DashboardData {
   date: string
   participants: ParticipantAnalysis[]
   market_summary: MarketSummary
-  is_mock_data: boolean
 }
 
 export interface DateOption {

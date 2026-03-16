@@ -63,16 +63,6 @@ export default function Dashboard() {
                 />
 
                 <div className="flex items-center gap-3">
-                    {dashboardData?.is_mock_data && (
-                        <motion.div
-                            initial={{ opacity: 0, scale: 0.9 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-500/10 border border-neutral-500/20 text-neutral-400 text-xs font-medium"
-                        >
-                            <AlertTriangle className="w-3.5 h-3.5" />
-                            Demo Data
-                        </motion.div>
-                    )}
 
                     <motion.button
                         whileHover={{ scale: 1.05 }}
