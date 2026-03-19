@@ -10,6 +10,7 @@ import logging
 import asyncio
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
@@ -34,7 +35,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ─── Constants ──────────────────────────────────────────────────────
 load_dotenv()
+IST = ZoneInfo("Asia/Kolkata")
 
 # ─── FastAPI App ────────────────────────────────────────────────────
 # ─── Lifespan ────────────────────────────────────────────────────────
@@ -396,14 +399,14 @@ TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
 # ─── API Routes ────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "timestamp": datetime.now(IST).isoformat()}
 
 
 @app.get("/api/available-dates", response_model=List[DateOption])
 async def get_available_dates():
     """Return the last 30 trading days (weekdays) as available dates"""
     dates: List[DateOption] = []
-    current = datetime.now()
+    current = datetime.now(IST)
 
     count = 0
     while count < 30:
@@ -519,7 +522,7 @@ async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bo
         logger.warning("Telegram app not initialized")
         return
 
-    target_date = date or datetime.now().strftime("%d-%m-%Y")
+    target_date = date or datetime.now(IST).strftime("%d-%m-%Y")
 
     # Weekend check
     try:
@@ -604,7 +607,7 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = str(update.message.chat_id)
-    now = datetime.now()
+    now = datetime.now(IST)
     current_date_str = now.strftime("%d-%m-%Y")
 
     # 1. If it's a weekday, try to get today's data
@@ -760,7 +763,7 @@ async def setup_telegram_bot(fastapi_app: FastAPI):
         logger.error(f"Invalid default cron schedule: {TELEGRAM_CRON_SCHEDULE}. Task NOT scheduled.")
         return
 
-    scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler(timezone=IST)
     fastapi_app.state.scheduler = scheduler
     
     scheduler.add_job(
@@ -810,7 +813,7 @@ async def test_telegram():
     """Test endpoint to send a message via Telegram"""
     if not TELEGRAM_ENABLED or not TELEGRAM_CHAT_ID:
         return {"error": "Telegram not configured"}
-    today = datetime.now().strftime("%d-%m-%Y")
+    today = datetime.now(IST).strftime("%d-%m-%Y")
     await send_dashboard_message(TELEGRAM_CHAT_ID, today)
     return {"status": "Message sent"}
 
