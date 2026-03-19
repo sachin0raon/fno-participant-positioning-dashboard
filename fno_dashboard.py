@@ -569,7 +569,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📊 *F&O Dashboard Bot*\n\n"
         "Available commands:\n"
-        "/today - Get today's report\n"
+        "/recent - Get latest report\n"
         "/date DD-MM-YYYY - Get report for specific date\n"
         "/cron - Show/update schedule\n"
         "/help - Show this help message",
@@ -585,7 +585,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📊 *F&O Dashboard Commands*\n\n"
         "*Commands:*\n"
-        "/today - Get today's F&O report\n"
+        "/recent - Get latest F&O report\n"
         "/date `DD-MM-YYYY` - Get report for a specific date\n"
         "Example: `/date 14-03-2026`\n\n"
         "*Scheduler:*\n"
@@ -598,19 +598,35 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /today command"""
+async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /recent command"""
     if TELEGRAM_CHAT_ID and str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
         return
 
+    chat_id = str(update.message.chat_id)
     now = datetime.now()
-    if now.weekday() >= 5:
-        # Weekend: Fetch last trading day
-        last_trading_day = fetcher.get_previous_trading_day(now.strftime("%d-%m-%Y"))
-        header = f"🍹 *Market is Closed today.*\nShowing latest report ({last_trading_day}):\n\n"
-        await send_dashboard_message(str(update.message.chat_id), last_trading_day, header=header)
-    else:
-        await send_dashboard_message(str(update.message.chat_id), now.strftime("%d-%m-%Y"))
+    current_date_str = now.strftime("%d-%m-%Y")
+
+    # 1. If it's a weekday, try to get today's data
+    if now.weekday() < 5:
+        data = await _fetch_and_analyze_data(current_date_str)
+        if data:
+            message = format_compact_message(data)
+            try:
+                await app.state.telegram_app.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
+                logger.info(f"Dashboard sent for current date: {current_date_str}")
+                return
+            except Exception as e:
+                logger.error(f"Failed to send message: {e}")
+                # Fall through to error handle or fallback logic
+
+    # 2. If it's a weekend OR today's data is not yet available, fallback to previous trading day
+    prev_date_str = fetcher.get_previous_trading_day(current_date_str)
+    reason = "Market is Closed" if now.weekday() >= 5 else "Today's data is not yet available"
+    header = f"ℹ️ *{reason}* ({current_date_str})\nShowing latest available report (*{prev_date_str}*):\n\n"
+    
+    # We use send_dashboard_message here because it handles errors gracefully
+    await send_dashboard_message(chat_id, prev_date_str, header=header)
 
 
 async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -723,14 +739,14 @@ async def setup_telegram_bot(fastapi_app: FastAPI):
     # Register handlers
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(CommandHandler("help", help_command))
-    telegram_app.add_handler(CommandHandler("today", today_command))
+    telegram_app.add_handler(CommandHandler("recent", recent_command))
     telegram_app.add_handler(CommandHandler("date", date_command))
     telegram_app.add_handler(CommandHandler("cron", cron_command))
     telegram_app.add_error_handler(error_handler)
 
     # Set command list for Telegram UI
     commands = [
-        BotCommand("today", "Get today's F&O participant report"),
+        BotCommand("recent", "Get latest F&O participant report"),
         BotCommand("date", "Get report for specific date (DD-MM-YYYY)"),
         BotCommand("cron", "Show or update the automated schedule"),
         BotCommand("help", "Show all available commands"),
