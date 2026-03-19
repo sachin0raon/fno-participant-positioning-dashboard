@@ -18,7 +18,7 @@ The **F&O Dashboard** provides advanced insights into how different market parti
 
 - **🚀 Real-time NSE Data**: Fetches and parses participant-wise OI data directly from NSE India using `nselib`.
 - **📈 Advanced Sentiment Analysis**: Proprietary logic to calculate sentiment scores and market direction for each participant category.
-- **📱 Telegram Integration**: Automated delivery of daily EOD reports and interactive commands (`/today`, `/date`, `/cron`) to your Telegram channel.
+- **📱 Telegram Integration**: Automated delivery of daily EOD reports and interactive commands (`/recent`, `/date`, `/cron`). The `/recent` command intelligently fetches today's data or falls back to the latest available trading day.
 - **💎 Premium UI**: Built with React 19, Framer Motion for smooth animations, and Tailwind CSS 4 for a modern "Glassmorphism" aesthetic.
 - **🐳 Containerized**: Fully Dockerized for seamless deployment across any environment.
 - **📅 Historical Look-back**: Easily navigate and compare positioning across the last 30 trading days.
