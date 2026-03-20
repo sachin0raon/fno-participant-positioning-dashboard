@@ -4,10 +4,7 @@ FastAPI backend serving Futures & Options positioning data
 Data source: National Stock Exchange of India (NSE)
 """
 
-import hashlib
-import random
 import logging
-import asyncio
 import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -516,32 +513,41 @@ def format_compact_message(data: DashboardResponse) -> str:
     return "\n".join(lines)
 
 
-async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bool = False, header: str = ""):
+async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bool = False, header: str = "", smart_fallback: bool = False):
     """Send dashboard report to a specific chat"""
     if not hasattr(app.state, "telegram_app"):
         logger.warning("Telegram app not initialized")
         return
 
-    target_date = date or datetime.now(IST).strftime("%d-%m-%Y")
+    now = datetime.now(IST)
+    target_date = date or now.strftime("%d-%m-%Y")
 
-    # Weekend check
+    # 1. Weekend/Holiday Check for specific date
     try:
-        dt = datetime.strptime(target_date, "%d-%m-%Y")
+        dt = datetime.strptime(target_date, "%d-%m-%Y").replace(tzinfo=IST)
         if dt.weekday() >= 5:
             if silent_skip:
-                logger.info(f"Silently skipping weekend: {target_date}")
+                logger.info(f"Silently skipping weekend scheduling: {target_date}")
                 return
             
+            if smart_fallback:
+                prev_date_str = fetcher.get_previous_trading_day(target_date)
+                fallback_header = f"ℹ️ *Market is Closed* ({target_date})\nShowing latest available report (*{prev_date_str}*):\n\n"
+                # Call again with the previous trading day, disable fallback to avoid infinite loops
+                return await send_dashboard_message(chat_id, prev_date_str, header=fallback_header, smart_fallback=False)
+
             await app.state.telegram_app.bot.send_message(
                 chat_id=chat_id,
                 text=f"🍹 *Market is Closed* ({target_date})\n\nPositions are only updated on trading days (Monday - Friday).",
                 parse_mode="Markdown"
             )
             return
-    except Exception:
+    except Exception as e:
+        logger.error(f"Date check error: {e}")
         pass
 
-    logger.info(f"Sending dashboard for {target_date}")
+    # 2. Data Fetching
+    logger.info(f"Fetching dashboard for {target_date} (smart_fallback={smart_fallback})")
     data = await _fetch_and_analyze_data(target_date)
 
     if data:
@@ -551,9 +557,15 @@ async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bo
             logger.info(f"Dashboard sent for {target_date}")
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
+    elif smart_fallback:
+        # 3. Fallback logic: if data missing for the requested date, try previous trading day
+        prev_date_str = fetcher.get_previous_trading_day(target_date)
+        fallback_header = f"ℹ️ *Today's data is not yet available* ({target_date})\nShowing latest available report (*{prev_date_str}*):\n\n"
+        logger.info(f"Data not available for {target_date}, falling back to {prev_date_str}")
+        return await send_dashboard_message(chat_id, prev_date_str, header=fallback_header, smart_fallback=False)
     else:
+        # Final failure message if no fallback or fallback also failed
         try:
-            # Inform user that data fetch failed for the day
             failure_msg = f"{header}🔴 *Data Unavailable*\n\nUnable to fetch F&O positioning data for *{target_date}* from NSE India at this time. This usually happens if the exchange hasn't released the data yet or there's a connectivity issue."
             await app.state.telegram_app.bot.send_message(chat_id=chat_id, text=failure_msg, parse_mode="Markdown")
             logger.warning(f"Sent failure notification for {target_date}")
@@ -607,29 +619,7 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = str(update.message.chat_id)
-    now = datetime.now(IST)
-    current_date_str = now.strftime("%d-%m-%Y")
-
-    # 1. If it's a weekday, try to get today's data
-    if now.weekday() < 5:
-        data = await _fetch_and_analyze_data(current_date_str)
-        if data:
-            message = format_compact_message(data)
-            try:
-                await app.state.telegram_app.bot.send_message(chat_id=chat_id, text=message, parse_mode="Markdown")
-                logger.info(f"Dashboard sent for current date: {current_date_str}")
-                return
-            except Exception as e:
-                logger.error(f"Failed to send message: {e}")
-                # Fall through to error handle or fallback logic
-
-    # 2. If it's a weekend OR today's data is not yet available, fallback to previous trading day
-    prev_date_str = fetcher.get_previous_trading_day(current_date_str)
-    reason = "Market is Closed" if now.weekday() >= 5 else "Today's data is not yet available"
-    header = f"ℹ️ *{reason}* ({current_date_str})\nShowing latest available report (*{prev_date_str}*):\n\n"
-    
-    # We use send_dashboard_message here because it handles errors gracefully
-    await send_dashboard_message(chat_id, prev_date_str, header=header)
+    await send_dashboard_message(chat_id, smart_fallback=True)
 
 
 async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -702,7 +692,7 @@ async def cron_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             send_dashboard_message,
             "cron",
             args=[TELEGRAM_CHAT_ID],
-            kwargs={"silent_skip": True},
+            kwargs={"silent_skip": True, "smart_fallback": True},
             **parsed,
             id="daily_dashboard"
         )
@@ -770,7 +760,7 @@ async def setup_telegram_bot(fastapi_app: FastAPI):
         send_dashboard_message,
         "cron",
         args=[TELEGRAM_CHAT_ID],
-        kwargs={"silent_skip": True},
+        kwargs={"silent_skip": True, "smart_fallback": True},
         **parsed_cron,
         id="daily_dashboard"
     )
