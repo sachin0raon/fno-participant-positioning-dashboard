@@ -32,6 +32,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Silence noisy libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 # ─── Constants ──────────────────────────────────────────────────────
 load_dotenv()
 IST = ZoneInfo("Asia/Kolkata")
