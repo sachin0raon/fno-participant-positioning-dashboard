@@ -1,0 +1,51 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploying via SSH
+        uses: appleboy/ssh-action@v1.2.5
+        env:
+          TELEGRAM_CRON_SCHEDULE: ${{ vars.TELEGRAM_CRON_SCHEDULE }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          envs: TELEGRAM_CRON_SCHEDULE
+          script: |
+            cd /home/ubuntu/
+
+            # Generate a timestamp for dynamic naming
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            DIR_NAME="fno-$TIMESTAMP"
+
+            # 1. Clone the repository
+            git clone https://github.com/sachin0raon/fno-participant-positioning-dashboard.git $DIR_NAME
+
+            # 2. Build the image
+            cd $DIR_NAME
+            docker build -t fno:$TIMESTAMP .
+
+            # 3. Stop and remove existing container
+            docker stop fno || true
+            docker rm fno || true
+
+            # 4. Start the new container with runtime environment variables
+            docker run -d \
+              --name fno \
+              --restart unless-stopped \
+              -e TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}" \
+              -e TELEGRAM_CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -e TELEGRAM_CRON_SCHEDULE="$TELEGRAM_CRON_SCHEDULE" \
+              -p 9030:8000 \
+              fno:$TIMESTAMP
+
+            # 5. Cleanup the build folder
+            cd /home/ubuntu/
+            rm -rf $DIR_NAME
