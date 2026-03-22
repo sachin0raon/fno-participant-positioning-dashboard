@@ -6,6 +6,7 @@ Data source: National Stock Exchange of India (NSE)
 
 import logging
 import os
+import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
@@ -180,7 +181,7 @@ class NSEFNODataFetcher:
             prev -= timedelta(days=1)
         return prev.strftime("%d-%m-%Y")
 
-    def get_participant_oi_data(self, date: str) -> Optional[List[ParticipantData]]:
+    async def get_participant_oi_data(self, date: str) -> Optional[List[ParticipantData]]:
         """
         Fetch participant-wise Open Interest change for a given date.
         Calculates Change = (Today's OI - Yesterday's OI)
@@ -188,14 +189,14 @@ class NSEFNODataFetcher:
         try:
             logger.info(f"Fetching NSE data for {date} and its previous trading day")
             
-            # 1. Fetch Today's Data
-            df_curr = derivatives.participant_wise_open_interest(date)
+            # 1. Fetch Today's Data in a thread to avoid blocking event loop
+            df_curr = await asyncio.to_thread(derivatives.participant_wise_open_interest, date)
             if df_curr is None or df_curr.empty:
                 return None
             
             # 2. Fetch Yesterday's Data
             prev_date = self.get_previous_trading_day(date)
-            df_prev = derivatives.participant_wise_open_interest(prev_date)
+            df_prev = await asyncio.to_thread(derivatives.participant_wise_open_interest, prev_date)
             
             # If yesterday's data is missing, we can't show "Change", 
             # but for this specific request, we'll try to fallback or return raw
@@ -424,7 +425,7 @@ async def get_available_dates():
 
 async def _fetch_and_analyze_data(date: str) -> Optional[DashboardResponse]:
     """Internal helper to fetch data, analyze it and format response"""
-    data = fetcher.get_participant_oi_data(date)
+    data = await fetcher.get_participant_oi_data(date)
 
     if not data:
         return None
