@@ -7,6 +7,7 @@ Data source: National Stock Exchange of India (NSE)
 import logging
 import os
 import asyncio
+from functools import lru_cache
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
@@ -181,6 +182,11 @@ class NSEFNODataFetcher:
             prev -= timedelta(days=1)
         return prev.strftime("%d-%m-%Y")
 
+    @lru_cache(maxsize=100)
+    def _fetch_raw_nse_data(self, date: str):
+        """Cached wrapper for nselib call- return dataframe"""
+        return derivatives.participant_wise_open_interest(date)
+
     async def get_participant_oi_data(self, date: str) -> Optional[List[ParticipantData]]:
         """
         Fetch participant-wise Open Interest change for a given date.
@@ -190,13 +196,13 @@ class NSEFNODataFetcher:
             logger.info(f"Fetching NSE data for {date} and its previous trading day")
             
             # 1. Fetch Today's Data in a thread to avoid blocking event loop
-            df_curr = await asyncio.to_thread(derivatives.participant_wise_open_interest, date)
+            df_curr = await asyncio.to_thread(self._fetch_raw_nse_data, date)
             if df_curr is None or df_curr.empty:
                 return None
             
             # 2. Fetch Yesterday's Data
             prev_date = self.get_previous_trading_day(date)
-            df_prev = await asyncio.to_thread(derivatives.participant_wise_open_interest, prev_date)
+            df_prev = await asyncio.to_thread(self._fetch_raw_nse_data, prev_date)
             
             # If yesterday's data is missing, we can't show "Change", 
             # but for this specific request, we'll try to fallback or return raw
