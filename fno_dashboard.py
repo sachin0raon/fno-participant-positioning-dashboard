@@ -6,12 +6,15 @@ Data source: National Stock Exchange of India (NSE)
 
 import logging
 import os
+import json
 import asyncio
+from pathlib import Path
 from functools import lru_cache
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any, Union
+import pandas as pd
 import nselib
 from nselib import derivatives
 from fastapi import FastAPI, Query, HTTPException
@@ -41,6 +44,8 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 # ─── Constants ──────────────────────────────────────────────────────
 load_dotenv()
 IST = ZoneInfo("Asia/Kolkata")
+CACHE_DIR = Path("data_cache")
+CACHE_DIR.mkdir(exist_ok=True)
 
 # ─── FastAPI App ────────────────────────────────────────────────────
 # ─── Lifespan ────────────────────────────────────────────────────────
@@ -267,10 +272,53 @@ class NSEFNODataFetcher:
                 break
         return prev.strftime("%d-%m-%Y")
 
+    def _get_cache_path(self, date: str) -> Path:
+        return CACHE_DIR / f"oi_{date}.json"
+
+    def _fetch_from_cache(self, date: str) -> Optional[List[Dict[str, Any]]]:
+        path = self._get_cache_path(date)
+        if path.exists():
+            try:
+                with open(path, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Cache Read Error ({date}): {e}")
+        return None
+
+    def _save_to_cache(self, date: str, data: List[ParticipantData]):
+        path = self._get_cache_path(date)
+        try:
+            with open(path, 'w') as f:
+                json.dump([asdict(p) for p in data], f, indent=2)
+        except Exception as e:
+            logger.error(f"Cache Write Error ({date}): {e}")
+
     @lru_cache(maxsize=100)
-    def _fetch_raw_nse_data(self, date: str):
-        """Cached wrapper for nselib call- return dataframe"""
-        return derivatives.participant_wise_open_interest(date)
+    def _fetch_raw_nse_data(self, date: str) -> Optional[List[ParticipantData]]:
+        """
+        Fetch participant-wise open interest.
+        Checks local file cache first, then calls nselib.
+        """
+        # 1. Check file cache first
+        cached_raw = self._fetch_from_cache(date)
+        if cached_raw:
+            logger.info(f"Cache hit for {date}")
+            return [ParticipantData(**d) for d in cached_raw]
+
+        # 2. Fetch from NSE
+        logger.info(f"Cache miss for {date}. Calling NSE API.")
+        try:
+            df = derivatives.participant_wise_open_interest(date)
+            if df is None or df.empty:
+                return None
+            
+            parsed = self._parse_dataframe(df)
+            if parsed:
+                self._save_to_cache(date, parsed)
+            return parsed
+        except Exception as e:
+            logger.error(f"NSE API Fetch Error for {date}: {e}")
+            return None
 
     async def get_participant_oi_data(self, date: str) -> Optional[List[ParticipantData]]:
         """
@@ -278,29 +326,49 @@ class NSEFNODataFetcher:
         Calculates Change = (Today's OI - Yesterday's OI)
         """
         try:
-            logger.info(f"Fetching NSE data for {date} and its previous trading day")
+            logger.info(f"Processing data for {date}")
             
-            # 1. Fetch Today's Data in a thread to avoid blocking event loop
-            df_curr = await asyncio.to_thread(self._fetch_raw_nse_data, date)
-            if df_curr is None or df_curr.empty:
+            # 1. Fetch Today's Data
+            curr_data = await asyncio.to_thread(self._fetch_raw_nse_data, date)
+            if not curr_data:
                 return None
             
             # 2. Fetch Yesterday's Data
             prev_date = self.get_previous_trading_day(date)
-            df_prev = await asyncio.to_thread(self._fetch_raw_nse_data, prev_date)
+            prev_data = await asyncio.to_thread(self._fetch_raw_nse_data, prev_date)
             
-            # If yesterday's data is missing, we can't show "Change", 
-            # but for this specific request, we'll try to fallback or return raw
-            if df_prev is None or df_prev.empty:
+            if not prev_data:
                 logger.warning(f"Previous day data ({prev_date}) not found. Returning raw positioning.")
-                return self._parse_dataframe(df_curr)
+                return curr_data
 
             # 3. Calculate Change
-            return self._calculate_change(df_curr, df_prev)
+            return self._calculate_change(curr_data, prev_data)
 
         except Exception as e:
-            logger.error(f"nselib Fetch Error: {e}")
+            logger.error(f"Data Processor Error: {e}")
             return None
+
+    def _calculate_change(self, curr: List[ParticipantData], prev: List[ParticipantData]) -> List[ParticipantData]:
+        """Calculates Today - Yesterday for all fields from parsed data"""
+        curr_map = {p.category: p for p in curr}
+        prev_map = {p.category: p for p in prev}
+        
+        change_list = []
+        for cat in ["FII", "DII", "PRO", "CLIENT"]:
+            c = curr_map.get(cat)
+            p = prev_map.get(cat)
+            
+            if c and p:
+                change_list.append(ParticipantData(
+                    category=cat,
+                    futures_long=c.futures_long - p.futures_long,
+                    futures_short=c.futures_short - p.futures_short,
+                    calls_bought=c.calls_bought - p.calls_bought,
+                    calls_sold=c.calls_sold - p.calls_sold,
+                    puts_bought=c.puts_bought - p.puts_bought,
+                    puts_sold=c.puts_sold - p.puts_sold
+                ))
+        return change_list
 
     def _parse_dataframe(self, df) -> List[ParticipantData]:
         """Helper to parse raw NSE dataframe into ParticipantData list"""
@@ -327,28 +395,6 @@ class NSEFNODataFetcher:
                     puts_sold=int(row['Option Index Put Short'])
                 ))
         return data_list
-
-    def _calculate_change(self, df_curr, df_prev) -> List[ParticipantData]:
-        """Calculates Today - Yesterday for all fields"""
-        curr_map = {p.category: p for p in self._parse_dataframe(df_curr)}
-        prev_map = {p.category: p for p in self._parse_dataframe(df_prev)}
-        
-        change_list = []
-        for cat in ["FII", "DII", "PRO", "CLIENT"]:
-            c = curr_map.get(cat)
-            p = prev_map.get(cat)
-            
-            if c and p:
-                change_list.append(ParticipantData(
-                    category=cat,
-                    futures_long=c.futures_long - p.futures_long,
-                    futures_short=c.futures_short - p.futures_short,
-                    calls_bought=c.calls_bought - p.calls_bought,
-                    calls_sold=c.calls_sold - p.calls_sold,
-                    puts_bought=c.puts_bought - p.puts_bought,
-                    puts_sold=c.puts_sold - p.puts_sold
-                ))
-        return change_list
 
 
 
@@ -617,29 +663,38 @@ async def get_fno_data(
 # ─── Telegram Bot Functions ──────────────────────────────────────────
 
 def format_compact_message(data: DashboardResponse) -> str:
-    """Generate a compact formatted message for Telegram"""
+    """Generate a rich premium formatted message for Telegram"""
     lines = []
-    lines.append(f"📊 *F&O Dashboard - {data.date}*")
-    lines.append("")
-
+    lines.append("🏦 *F&O PARTICIPANT POSITIONING* 🏦")
+    lines.append(f"📅 *Date:* `{data.date}`")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    
     # Market summary
     summary = data.market_summary
-    lines.append(f"🌐 *Overall Sentiment:* {summary.overall_sentiment}")
-    lines.append(f"🐂 {summary.bullish_count} Bullish | 🐻 {summary.bearish_count} Bearish | ➖ {summary.neutral_count} Neutral")
-    lines.append(f"🔥 *Top Bull:* {summary.most_bullish} | ❄️ *Top Bear:* {summary.most_bearish}")
+    lines.append(f"🌐 *MARKET SENTIMENT:* {summary.overall_sentiment}")
+    lines.append(f"🐂 {summary.bullish_count} Bullish | 🐻 {summary.bearish_count} Bearish | ⚪ {summary.neutral_count} Neutral")
     lines.append("")
+    lines.append(f"🏆 *LEADERS:*")
+    lines.append(f"🔥 Top Bull: *{summary.most_bullish}*")
+    lines.append(f"❄️ Top Bear: *{summary.most_bearish}*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
 
     # Participants
-    lines.append("*Position Analysis:*")
+    lines.append("📊 *POSITION ANALYSIS:*")
+    lines.append("")
+    
     for p in data.participants:
         emoji = "🟢" if p.overall_sentiment == "Bullish" else "🔴" if p.overall_sentiment == "Bearish" else "⚪"
-        fut = f"F:{p.futures.net:+d}"
-        ce = f"CE:{p.calls.net:+d}"
-        pe = f"PE:{p.puts.net:+d}"
-        lines.append(f"{emoji} *{p.symbol}*: {fut} | {ce} | {pe}")
+        
+        lines.append(f"{emoji} *{p.category}* ({p.overall_sentiment})")
+        lines.append(f" ├ 📈 *Futures:* `{p.futures.net:+d}`")
+        lines.append(f" ├ 📞 *Calls:* `{p.calls.net:+d}`")
+        lines.append(f" └ 📉 *Puts:* `{p.puts.net:+d}`")
+        lines.append("")
 
-    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"🏛️ *FII:* {summary.fii_sentiment} | *DII:* {summary.dii_sentiment}")
+    lines.append(f"🤖 _Source: NSE India | Analyzed via Python_")
 
     return "\n".join(lines)
 
@@ -735,10 +790,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/recent - Get latest F&O report\n"
         "/date `DD-MM-YYYY` - Get report for a specific date\n"
         "Example: `/date 14-03-2026`\n\n"
-        "*Scheduler:*\n"
+        "*Utilities:*\n"
+        "/status - Check bot health & cache stats\n"
         "/cron - Show current schedule\n"
         "/cron `<expression>` - Update schedule\n"
-        "Example: `/cron */5 * * * *` (every 5 min)\n"
         "Example: `/cron 0 9 * * 1-5` (9 AM weekdays)\n\n"
         "Format: `minute hour day month day_of_week`",
         parse_mode="Markdown"
@@ -839,6 +894,33 @@ async def cron_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Failed to update scheduler: {e}")
 
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /status command"""
+    if TELEGRAM_CHAT_ID and str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    # Check components
+    bot_status = "✅ Active"
+    scheduler_status = "✅ Active" if hasattr(app.state, "scheduler") and app.state.scheduler.running else "❌ Inactive"
+    
+    next_run = "N/A"
+    if hasattr(app.state, "scheduler"):
+        job = app.state.scheduler.get_job("daily_dashboard")
+        if job and job.next_run_time:
+            next_run = job.next_run_time.strftime("%d-%m-%Y %H:%M:%S IST")
+    
+    now = datetime.now(IST).strftime("%d-%m-%Y %H:%M:%S IST")
+
+    await update.message.reply_text(
+        f"🤖 *Bot Status:* {bot_status}\n"
+        f"📅 *Scheduler:* {scheduler_status}\n"
+        f"⏰ *Next Report:* `{next_run}`\n"
+        f"🕒 *Current Time:* `{now}`\n\n"
+        f"📡 *NSE Data Cache:* {len(list(CACHE_DIR.glob('*.json')))} files stored",
+        parse_mode="Markdown"
+    )
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     from telegram.error import RetryAfter
@@ -867,6 +949,7 @@ async def setup_telegram_bot(fastapi_app: FastAPI):
     telegram_app.add_handler(CommandHandler("recent", recent_command))
     telegram_app.add_handler(CommandHandler("date", date_command))
     telegram_app.add_handler(CommandHandler("cron", cron_command))
+    telegram_app.add_handler(CommandHandler("status", status_command))
     telegram_app.add_error_handler(error_handler)
     
     # Store app
@@ -877,6 +960,7 @@ async def setup_telegram_bot(fastapi_app: FastAPI):
         BotCommand("recent", "Get latest F&O participant report"),
         BotCommand("date", "Get report for specific date (DD-MM-YYYY)"),
         BotCommand("cron", "Show or update the automated schedule"),
+        BotCommand("status", "Check bot health and next run time"),
         BotCommand("help", "Show all available commands"),
         BotCommand("start", "Start the bot and show welcome message"),
     ]
