@@ -48,27 +48,44 @@ IST = ZoneInfo("Asia/Kolkata")
 async def lifespan(app: FastAPI):
     """Manage lifecycle of Telegram bot and Scheduler"""
     if TELEGRAM_ENABLED:
-        await setup_telegram_bot(app)
-        if hasattr(app.state, "telegram_app"):
-            await app.state.telegram_app.initialize()
-            await app.state.telegram_app.start()
-            await app.state.telegram_app.updater.start_polling(drop_pending_updates=True)
-            logger.info("Telegram bot polling started")
-            if hasattr(app.state, "scheduler"):
-                app.state.scheduler.start()
-                logger.info("Scheduler started for daily dashboard")
+        try:
+            await setup_telegram_bot(app)
+            if hasattr(app.state, "telegram_app"):
+                tg_app = app.state.telegram_app
+                # setup_telegram_bot already called initialize() to set commands
+                await tg_app.start()
+                
+                # Start polling as a background task
+                if tg_app.updater:
+                    await tg_app.updater.start_polling(drop_pending_updates=True)
+                    logger.info("Telegram bot polling started")
+                
+                if hasattr(app.state, "scheduler"):
+                    app.state.scheduler.start()
+                    logger.info("Scheduler started for daily dashboard")
+        except Exception as e:
+            logger.error(f"Error during lifespan startup: {e}")
     
     yield
     
     # Cleanup
     if hasattr(app.state, "scheduler") and app.state.scheduler.running:
-        app.state.scheduler.shutdown()
+        try:
+            app.state.scheduler.shutdown()
+            logger.info("Scheduler shutdown complete")
+        except Exception as e:
+            logger.error(f"Error shutting down scheduler: {e}")
+
     if hasattr(app.state, "telegram_app"):
-        if app.state.telegram_app.updater and app.state.telegram_app.updater.running:
-            await app.state.telegram_app.updater.stop()
-        await app.state.telegram_app.stop()
-        await app.state.telegram_app.shutdown()
-    logger.info("Telegram bot stopped")
+        try:
+            tg_app = app.state.telegram_app
+            if tg_app.updater and tg_app.updater.running:
+                await tg_app.updater.stop()
+            await tg_app.stop()
+            await tg_app.shutdown()
+            logger.info("Telegram bot shutdown complete")
+        except Exception as e:
+            logger.error(f"Error shutting down Telegram bot: {e}")
 
 
 # ─── FastAPI App ────────────────────────────────────────────────────
@@ -838,19 +855,22 @@ async def setup_telegram_bot(fastapi_app: FastAPI):
         logger.info("Telegram bot disabled: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
         return
 
-    logger.info(f"Initializing Telegram bot with token: {TELEGRAM_BOT_TOKEN[:5]}...")
+    logger.info(f"Initializing Telegram bot...")
 
     # Create application
+    # Use a more robust builder
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    fastapi_app.state.telegram_app = telegram_app
-
-    # Register handlers
+    
+    # Register handlers before initialize
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(CommandHandler("help", help_command))
     telegram_app.add_handler(CommandHandler("recent", recent_command))
     telegram_app.add_handler(CommandHandler("date", date_command))
     telegram_app.add_handler(CommandHandler("cron", cron_command))
     telegram_app.add_error_handler(error_handler)
+    
+    # Store app
+    fastapi_app.state.telegram_app = telegram_app
 
     # Set command list for Telegram UI
     commands = [
@@ -860,7 +880,19 @@ async def setup_telegram_bot(fastapi_app: FastAPI):
         BotCommand("help", "Show all available commands"),
         BotCommand("start", "Start the bot and show welcome message"),
     ]
-    await telegram_app.bot.set_my_commands(commands)
+    
+    try:
+        # We need to initialize to use the bot instance
+        await telegram_app.initialize()
+        await telegram_app.bot.set_my_commands(commands)
+        
+        # Log bot info to verify single instance
+        me = await telegram_app.bot.get_me()
+        logger.info(f"Bot @{me.username} initialized successfully (ID: {me.id})")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize Telegram bot: {e}")
+        return
 
     # Setup scheduler
     parsed_cron = parse_cron_expression(TELEGRAM_CRON_SCHEDULE)
@@ -880,7 +912,7 @@ async def setup_telegram_bot(fastapi_app: FastAPI):
         id="daily_dashboard"
     )
 
-    logger.info(f"Telegram bot initialized. Schedule: {TELEGRAM_CRON_SCHEDULE}")
+    logger.info(f"Scheduler job 'daily_dashboard' added with schedule: {TELEGRAM_CRON_SCHEDULE}")
 
 
 def parse_cron_expression(cron_str: str) -> Optional[Dict[str, Any]]:
