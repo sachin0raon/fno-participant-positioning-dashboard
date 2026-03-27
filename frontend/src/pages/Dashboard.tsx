@@ -128,8 +128,8 @@ export default function Dashboard() {
                                     ? 'Positions for today have not been released by exchange yet.'
                                     : 'The National Stock Exchange (NSE) is closed today.'}
                             </p>
-                            <div className="flex items-center justify-center gap-2 text-accent-400 font-medium text-xl">
-                                <AlertTriangle className="w-5 h-5 text-amber-400" />
+                            <div className="flex items-start justify-center gap-3 text-accent-400 font-medium text-lg sm:text-xl">
+                                <AlertTriangle className="w-5 h-5 sm:w-6 sm:h-6 text-amber-400 shrink-0 mt-0.5 sm:mt-1" />
                                 <span>{(dashboardData as any).description}</span>
                             </div>
                             <p className="mt-4 text-slate-500 text-sm">
