@@ -11,8 +11,8 @@ from functools import lru_cache
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
-
+from typing import Dict, List, Optional, Any, Union
+import nselib
 from nselib import derivatives
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -160,26 +160,94 @@ class DashboardResponse(BaseModel):
 class DateOption(BaseModel):
     value: str
     label: str
+    status: Optional[str] = None
 
+class MarketStatusInfo(BaseModel):
+    is_holiday: bool = False
+    is_not_ready: bool = False
+    description: str
+    date: str
 
 # ─── NSE Data Fetcher ──────────────────────────────────────────────
 class NSEFNODataFetcher:
     """Fetches F&O participant data from NSE India"""
 
-    BASE_URL = "https://www.nseindia.com"
-
     def __init__(self):
-        # nselib handles its own session/cookies
-        pass
+        self._holidays = None
+        self._holidays_last_fetch = None
+
+    def get_holidays(self) -> List[str]:
+        """Fetch and cache NSE holidays for Equity Derivatives"""
+        now = datetime.now()
+        # Refresh cache daily
+        if self._holidays is not None and self._holidays_last_fetch is not None:
+            if (now - self._holidays_last_fetch).days < 1:
+                return self._holidays
+
+        try:
+            logger.info("Fetching NSE holiday calendar...")
+            df = nselib.trading_holiday_calendar()
+            # Filter for Equity Derivatives if possible, else use any
+            if 'Product' in df.columns:
+                df = df[df['Product'] == 'Equity Derivatives']
+            
+            # Dates are in DD-Mon-YYYY format (e.g., 15-Jan-2026)
+            # Convert to DD-MM-YYYY format for consistent comparison
+            holiday_list = []
+            for date_str in df['tradingDate'].values:
+                try:
+                    dt = datetime.strptime(date_str, "%d-%b-%Y")
+                    holiday_list.append(dt.strftime("%d-%m-%Y"))
+                except Exception as e:
+                    logger.warning(f"Failed to parse holiday date {date_str}: {e}")
+            
+            self._holidays = holiday_list
+            self._holidays_last_fetch = now
+            return self._holidays
+        except Exception as e:
+            logger.error(f"Error fetching holidays: {e}")
+            return []
+
+    def is_holiday(self, date_str: str) -> bool:
+        """Check if a given date (DD-MM-YYYY) is a holiday or weekend"""
+        dt = datetime.strptime(date_str, "%d-%m-%Y")
+        # Weekend?
+        if dt.weekday() >= 5:
+            return True
+        # Public Holiday?
+        holidays = self.get_holidays()
+        return date_str in holidays
+
+    def get_holiday_description(self, date_str: str) -> Optional[str]:
+        """Get description of the holiday if it is one"""
+        dt = datetime.strptime(date_str, "%d-%m-%Y")
+        if dt.weekday() == 5: return "Saturday (Weekend)"
+        if dt.weekday() == 6: return "Sunday (Weekend)"
+        
+        try:
+            df = nselib.trading_holiday_calendar()
+            if 'Product' in df.columns:
+                df = df[df['Product'] == 'Equity Derivatives']
+            
+            # Match date
+            matching = df[df['tradingDate'].apply(lambda x: datetime.strptime(x, "%d-%b-%Y").strftime("%d-%m-%Y") == date_str)]
+            if not matching.empty:
+                return str(matching['description'].values[0])
+        except:
+            pass
+        return None
 
     def get_previous_trading_day(self, date_str: str) -> str:
-        """Helper to find the previous weekday (simplified trading day logic)"""
+        """Helper to find the previous trading day (skipping weekends and holidays)"""
         dt = datetime.strptime(date_str, "%d-%m-%Y")
-        # Go back at least 1 day
         prev = dt - timedelta(days=1)
-        # Skip weekends
-        while prev.weekday() >= 5:
-            prev -= timedelta(days=1)
+        
+        while True:
+            prev_str = prev.strftime("%d-%m-%Y")
+            if prev.weekday() >= 5 or prev_str in self.get_holidays():
+                prev -= timedelta(days=1)
+            else:
+                break
         return prev.strftime("%d-%m-%Y")
 
     @lru_cache(maxsize=100)
@@ -412,17 +480,32 @@ async def health_check():
 
 @app.get("/api/available-dates", response_model=List[DateOption])
 async def get_available_dates():
-    """Return the last 30 trading days (weekdays) as available dates"""
+    """Return the last 30 weekdays, including holidays and the current pending day."""
     dates: List[DateOption] = []
-    current = datetime.now(IST)
+    now_ist = datetime.now(IST)
+    holidays = fetcher.get_holidays()
 
+    # Start from today regardless of time
+    current = now_ist
     count = 0
     while count < 30:
-        # Skip weekends
+        val = current.strftime("%d-%m-%Y")
+        # Include all weekdays
         if current.weekday() < 5:
-            value = current.strftime("%d-%m-%Y")
+            # 1. Base label
             label = current.strftime("%d %b %Y (%A)")
-            dates.append(DateOption(value=value, label=label))
+            
+            # 2. Status additions
+            # Holiday?
+            status = None
+            if val in holidays:
+                status = fetcher.get_holiday_description(val) or "Holiday"
+            # Today and early?
+            elif val == now_ist.strftime("%d-%m-%Y"):
+                if now_ist.hour < 18 or (now_ist.hour == 18 and now_ist.minute < 30):
+                    status = "Pending Update"
+
+            dates.append(DateOption(value=val, label=label, status=status))
             count += 1
         current -= timedelta(days=1)
 
@@ -474,23 +557,43 @@ async def _fetch_and_analyze_data(date: str) -> Optional[DashboardResponse]:
     )
 
 
-@app.get("/api/fno-data", response_model=DashboardResponse)
+@app.get("/api/fno-data", response_model=Union[DashboardResponse, MarketStatusInfo])
 async def get_fno_data(
     date: str = Query(..., description="Date in DD-MM-YYYY format"),
 ):
     """Fetch F&O participant data for a given trading date"""
     # Validate date format
     try:
-        datetime.strptime(date, "%d-%m-%Y")
+        dt_req = datetime.strptime(date, "%d-%m-%Y")
     except ValueError:
         raise HTTPException(
             status_code=400,
             detail="Invalid date format. Use DD-MM-YYYY.",
         )
 
+    # 1. Holiday Check
+    if fetcher.is_holiday(date):
+        return MarketStatusInfo(
+            is_holiday=True,
+            description=fetcher.get_holiday_description(date) or "Market Holiday",
+            date=date
+        )
+
+    # 2. Check if it's today and too early
+    now_ist = datetime.now(IST)
+    if date == now_ist.strftime("%d-%m-%Y"):
+        if now_ist.hour < 18 or (now_ist.hour == 18 and now_ist.minute < 30):
+            return MarketStatusInfo(
+                is_not_ready=True,
+                description="Today's market data is typically published by NSE after 6:30 PM IST.",
+                date=date
+            )
+
+    # 3. Fetch data
     response = await _fetch_and_analyze_data(date)
     if not response:
-        raise HTTPException(status_code=404, detail=f"No data available for {date}")
+        # Check if it was a holiday but fetcher didn't know (fallback)
+        raise HTTPException(status_code=404, detail=f"No data available for {date}. Please ensure it was a trading day.")
     return response
 
 
@@ -535,21 +638,22 @@ async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bo
 
     # 1. Weekend/Holiday Check for specific date
     try:
-        dt = datetime.strptime(target_date, "%d-%m-%Y").replace(tzinfo=IST)
-        if dt.weekday() >= 5:
+        if fetcher.is_holiday(target_date):
             if silent_skip:
-                logger.info(f"Silently skipping weekend scheduling: {target_date}")
+                logger.info(f"Silently skipping weekend/holiday scheduling: {target_date}")
                 return
             
             if smart_fallback:
                 prev_date_str = fetcher.get_previous_trading_day(target_date)
-                fallback_header = f"ℹ️ *Market is Closed* ({target_date})\nShowing latest available report (*{prev_date_str}*):\n\n"
+                holiday_desc = fetcher.get_holiday_description(target_date)
+                fallback_header = f"ℹ️ *Market is Closed* ({target_date} - {holiday_desc})\nShowing latest available report (*{prev_date_str}*):\n\n"
                 # Call again with the previous trading day, disable fallback to avoid infinite loops
                 return await send_dashboard_message(chat_id, prev_date_str, header=fallback_header, smart_fallback=False)
 
+            holiday_desc = fetcher.get_holiday_description(target_date) or "Market Holiday"
             await app.state.telegram_app.bot.send_message(
                 chat_id=chat_id,
-                text=f"🍹 *Market is Closed* ({target_date})\n\nPositions are only updated on trading days (Monday - Friday).",
+                text=f"🍹 *Market is Closed* ({target_date})\n\nReason: *{holiday_desc}*\n\nPositions are only updated on trading days.",
                 parse_mode="Markdown"
             )
             return
@@ -645,9 +749,9 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date_arg = context.args[0]
     # Validate date format
     try:
-        dt_arg = datetime.strptime(date_arg, "%d-%m-%Y")
-        if dt_arg.weekday() >= 5:
-            await update.message.reply_text(f"❌ *{date_arg}* was a weekend. Markets are closed on Saturdays and Sundays.", parse_mode="Markdown")
+        if fetcher.is_holiday(date_arg):
+            holiday_desc = fetcher.get_holiday_description(date_arg) or "Market Holiday"
+            await update.message.reply_text(f"❌ *{date_arg}* was a holiday/weekend ({holiday_desc}). Markets were closed.", parse_mode="Markdown")
             return
     except ValueError:
         await update.message.reply_text("Invalid date format. Use DD-MM-YYYY\nExample: /date 14-03-2026")

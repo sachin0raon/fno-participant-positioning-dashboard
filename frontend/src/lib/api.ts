@@ -1,8 +1,9 @@
-import type { DashboardData, DateOption } from '@/types'
+import type { DashboardData, DateOption, DashboardResponse } from '@/types'
 
 const API_BASE_URL = '/api'
 
-export async function fetchDashboardData(date: string): Promise<DashboardData> {
+export async function fetchDashboardData(date: string): Promise<DashboardResponse> {
+
   const response = await fetch(`${API_BASE_URL}/fno-data?date=${encodeURIComponent(date)}`)
 
   if (!response.ok) {

@@ -69,7 +69,7 @@ export function DateSelector({ dates, selectedDate, onChange }: DateSelectorProp
                   key={date.value}
                   value={date.value}
                   className={cn(
-                    'relative flex items-center px-3 py-2.5',
+                    'relative flex items-center justify-between gap-4 px-3 py-2.5',
                     'text-sm text-surface-300 rounded-lg',
                     'cursor-pointer outline-none select-none',
                     'transition-colors duration-150',
@@ -78,7 +78,19 @@ export function DateSelector({ dates, selectedDate, onChange }: DateSelectorProp
                   )}
                 >
                   <Select.ItemText>{date.label}</Select.ItemText>
+                  
+                  {date.status && (
+                    <span className={cn(
+                      "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider whitespace-nowrap",
+                      date.status === 'Pending Update' 
+                        ? "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+                        : "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                    )}>
+                      {date.status}
+                    </span>
+                  )}
                 </Select.Item>
+
               ))}
             </Select.Viewport>
 

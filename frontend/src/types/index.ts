@@ -43,10 +43,23 @@ export interface DashboardData {
   market_summary: MarketSummary
 }
 
+export interface MarketStatusInfo {
+  is_holiday?: boolean
+  is_not_ready?: boolean
+  description: string
+  date: string
+}
+
+export type DashboardResponse = DashboardData | MarketStatusInfo
+
+
+
 export interface DateOption {
   value: string
   label: string
+  status?: string
 }
+
 
 /* ─── Participant Display Info ─── */
 export type ParticipantSymbol = 'FII' | 'DII' | 'PRO' | 'CLIENT'

@@ -9,6 +9,9 @@ import { ParticipantCards } from '@/components/Dashboard/ParticipantCards'
 import { MarketVerdict } from '@/components/Dashboard/MarketVerdict'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { ErrorFallback } from '@/components/ui/ErrorFallback'
+import { Coffee, Clock } from 'lucide-react'
+
+
 
 const containerVariants: Variants = {
     hidden: { opacity: 0 },
@@ -99,7 +102,44 @@ export default function Dashboard() {
                     >
                         <ErrorFallback error={error} onRetry={() => refetch()} />
                     </motion.div>
-                ) : dashboardData ? (
+                ) : dashboardData && ('is_holiday' in dashboardData || 'is_not_ready' in dashboardData) ? (
+                    <motion.div
+                        key="market-status"
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        className="flex flex-col items-center justify-center min-h-[60vh] text-center p-8"
+                    >
+                        <div className="w-24 h-24 bg-accent-500/10 rounded-3xl flex items-center justify-center mb-8 border border-accent-500/20">
+                            {'is_not_ready' in dashboardData && (dashboardData as any).is_not_ready ? (
+                                <Clock className="w-12 h-12 text-accent-400" />
+                            ) : (
+                                <Coffee className="w-12 h-12 text-amber-400" />
+                            )}
+                        </div>
+                        <h2 className="text-3xl font-bold text-white mb-4">
+                            {'is_not_ready' in dashboardData && (dashboardData as any).is_not_ready 
+                                ? 'Data Not Available Yet'
+                                : 'Market is Closed'}
+                        </h2>
+                        <div className="bg-slate-800/50 backdrop-blur-md border border-slate-700/50 rounded-2xl p-6 max-w-lg">
+                            <p className="text-slate-300 text-lg mb-2">
+                                {'is_not_ready' in dashboardData && (dashboardData as any).is_not_ready
+                                    ? 'Positions for today have not been released by exchange yet.'
+                                    : 'The National Stock Exchange (NSE) is closed today.'}
+                            </p>
+                            <div className="flex items-center justify-center gap-2 text-accent-400 font-medium text-xl">
+                                <AlertTriangle className="w-5 h-5 text-amber-400" />
+                                <span>{(dashboardData as any).description}</span>
+                            </div>
+                            <p className="mt-4 text-slate-500 text-sm">
+                                {'is_not_ready' in dashboardData && (dashboardData as any).is_not_ready
+                                    ? 'Automated data synchronization will resume once NSE publishes the official participant data.'
+                                    : 'Positions and participant data are updated only on active trading days.'}
+                            </p>
+                        </div>
+                    </motion.div>
+                ) : dashboardData && 'participants' in dashboardData ? (
                     <motion.div
                         key={`data-${dashboardData.date}`}
                         variants={containerVariants}
@@ -128,6 +168,7 @@ export default function Dashboard() {
                         </motion.div>
                     </motion.div>
                 ) : null}
+
             </AnimatePresence>
         </div>
     )

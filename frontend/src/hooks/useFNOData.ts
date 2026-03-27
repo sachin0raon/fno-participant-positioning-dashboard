@@ -1,12 +1,13 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchDashboardData, fetchAvailableDates, fetchHealth } from '@/lib/api'
-import type { DashboardData, DateOption } from '@/types'
+import type { DashboardData, DateOption, DashboardResponse } from '@/types'
 import { useCallback } from 'react'
 
 export function useDashboardData(date: string) {
-  return useQuery<DashboardData, Error>({
+  return useQuery<DashboardResponse, Error>({
     queryKey: ['fno-data', date],
     queryFn: () => fetchDashboardData(date),
+
     enabled: !!date,
     staleTime: 5 * 60 * 1000,
     gcTime: 30 * 60 * 1000,
