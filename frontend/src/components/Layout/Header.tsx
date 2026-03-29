@@ -2,6 +2,7 @@ import { motion } from 'framer-motion'
 import { TrendingUp, Wifi, WifiOff } from 'lucide-react'
 import { useBackendHealth } from '@/hooks/useFNOData'
 import { cn } from '@/lib/utils'
+import { TimeLabel } from '../Dashboard/TimeLabel'
 
 export function Header() {
   const { data: health, isLoading } = useBackendHealth()
@@ -38,35 +39,40 @@ export function Header() {
             </div>
           </motion.div>
 
-          {/* Backend Status */}
-          <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: 0.3 }}
-            className="flex items-center gap-2"
-          >
-            <div
-              className={cn(
-                'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-300',
-                isConnected
-                  ? 'bg-bullish-500/10 text-bullish-400 border border-bullish-500/20'
-                  : isLoading
-                    ? 'bg-neutral-500/10 text-neutral-400 border border-neutral-500/20'
-                    : 'bg-bearish-500/10 text-bearish-400 border border-bearish-500/20',
-              )}
+          {/* Time and Status Group */}
+          <div className="flex items-center gap-6">
+            <TimeLabel />
+
+            {/* Backend Status */}
+            <motion.div
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.3 }}
+              className="flex items-center gap-2"
             >
-              {isLoading ? (
-                <div className="w-2 h-2 rounded-full bg-neutral-400 animate-pulse" />
-              ) : isConnected ? (
-                <Wifi className="w-3.5 h-3.5" />
-              ) : (
-                <WifiOff className="w-3.5 h-3.5" />
-              )}
-              <span>
-                {isLoading ? 'Connecting…' : isConnected ? 'Backend Live' : 'Disconnected'}
-              </span>
-            </div>
-          </motion.div>
+              <div
+                className={cn(
+                  'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-300',
+                  isConnected
+                    ? 'bg-bullish-500/10 text-bullish-400 border border-bullish-500/20'
+                    : isLoading
+                      ? 'bg-neutral-500/10 text-neutral-400 border border-neutral-500/20'
+                      : 'bg-bearish-500/10 text-bearish-400 border border-bearish-500/20',
+                )}
+              >
+                {isLoading ? (
+                  <div className="w-2 h-2 rounded-full bg-neutral-400 animate-pulse" />
+                ) : isConnected ? (
+                  <Wifi className="w-3.5 h-3.5" />
+                ) : (
+                  <WifiOff className="w-3.5 h-3.5" />
+                )}
+                <span>
+                  {isLoading ? 'Connecting…' : isConnected ? 'Backend Live' : 'Disconnected'}
+                </span>
+              </div>
+            </motion.div>
+          </div>
         </div>
       </div>
     </motion.header>
