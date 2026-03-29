@@ -59,9 +59,6 @@ export function DateSelector({ dates, selectedDate, onChange }: DateSelectorProp
             sideOffset={8}
             align="start"
           >
-            <Select.ScrollUpButton className="flex items-center justify-center h-6 text-surface-400">
-              <ChevronDown className="w-4 h-4 rotate-180" />
-            </Select.ScrollUpButton>
 
             <Select.Viewport className="p-1.5">
               {dates.map((date) => (
@@ -94,9 +91,6 @@ export function DateSelector({ dates, selectedDate, onChange }: DateSelectorProp
               ))}
             </Select.Viewport>
 
-            <Select.ScrollDownButton className="flex items-center justify-center h-6 text-surface-400">
-              <ChevronDown className="w-4 h-4" />
-            </Select.ScrollDownButton>
           </Select.Content>
         </Select.Portal>
       </Select.Root>
