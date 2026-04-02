@@ -297,7 +297,7 @@ class NSEFNODataFetcher:
     def _fetch_raw_nse_data(self, date: str) -> Optional[List[ParticipantData]]:
         """
         Fetch participant-wise open interest.
-        Checks local file cache first, then calls nselib.
+        Checks local file cache first, then calls nselib. If nselib fails, falls back to direct NSE requests.
         """
         # 1. Check file cache first
         cached_raw = self._fetch_from_cache(date)
@@ -305,19 +305,61 @@ class NSEFNODataFetcher:
             logger.info(f"Cache hit for {date}")
             return [ParticipantData(**d) for d in cached_raw]
 
-        # 2. Fetch from NSE
-        logger.info(f"Cache miss for {date}. Calling NSE API.")
+        # 2. Fetch from NSE via nselib first
+        logger.info(f"Cache miss for {date}. Calling NSE API via nselib.")
+        df = None
         try:
             df = derivatives.participant_wise_open_interest(date)
-            if df is None or df.empty:
-                return None
-            
+        except Exception as e:
+            logger.warning(f"nselib failed for {date}: {e}. Falling back to manual fetch.")
+
+        if df is None or df.empty:
+            # 3. Fallback to direct requests if nselib fails to fetch or returns empty DataFrame
+            try:
+                import requests
+                import io
+                
+                dt_obj = datetime.strptime(date, "%d-%m-%Y")
+                date_str = dt_obj.strftime("%d%m%Y")
+                
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Connection": "keep-alive",
+                }
+                
+                urls = [
+                    f"https://nsearchives.nseindia.com/content/nsccl/fao_participant_oi_{date_str}.csv",
+                    f"https://archives.nseindia.com/content/nsccl/fao_participant_oi_{date_str}.csv"
+                ]
+                
+                for url in urls:
+                    logger.info(f"Fallback URL: {url}")
+                    try:
+                        # requests auto-negotiates HTTP/1.1 and naturally skips Akamai HTTP/2 blocks
+                        resp = requests.get(url, headers=headers, timeout=15)
+                        if resp.status_code == 200:
+                            df_fallback = pd.read_csv(io.BytesIO(resp.content), on_bad_lines='skip', skiprows=1)
+                            if not df_fallback.empty:
+                                df = df_fallback
+                                break
+                    except Exception as req_e:
+                        logger.warning(f"Fallback request failed for {url}: {req_e}")
+            except Exception as e:
+                logger.error(f"NSE API Fallback Error for {date}: {e}")
+
+        if df is None or df.empty:
+            logger.warning(f"No data available for {date} from nselib or fallback.")
+            return None
+        
+        try:
             parsed = self._parse_dataframe(df)
             if parsed:
                 self._save_to_cache(date, parsed)
             return parsed
         except Exception as e:
-            logger.error(f"NSE API Fetch Error for {date}: {e}")
+            logger.error(f"Error parsing dataframe for {date}: {e}")
             return None
 
     async def get_participant_oi_data(self, date: str) -> Optional[List[ParticipantData]]:
