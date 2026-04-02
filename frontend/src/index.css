@@ -7,11 +7,11 @@
   --color-surface-800: #131837;
   --color-surface-700: #1e2448;
   --color-surface-600: #2a3060;
-  --color-surface-500: #3d4478;
-  --color-surface-400: #5a6194;
-  --color-surface-300: #8088b0;
-  --color-surface-200: #aeb4cf;
-  --color-surface-100: #d6d9e8;
+  --color-surface-500: #646d9a; /* Brightened from #3d4478 */
+  --color-surface-400: #8b93ba; /* Brightened from #5a6194 */
+  --color-surface-300: #a6adcd; /* Brightened from #8088b0 */
+  --color-surface-200: #cdd2e5; /* Brightened from #aeb4cf */
+  --color-surface-100: #eaedf6; /* Brightened from #d6d9e8 */
 
   --color-accent-500: #8b5cf6;
   --color-accent-400: #a78bfa;
