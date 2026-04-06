@@ -156,6 +156,7 @@ class OptionsAnalysis(InstrumentAnalysis):
 class ParticipantAnalysis(BaseModel):
     category: str
     symbol: str
+    emoji: str
     futures: FuturesAnalysis
     calls: OptionsAnalysis
     puts: OptionsAnalysis
@@ -451,6 +452,13 @@ class SentimentAnalyzer:
         "CLIENT": "Retail Traders",
     }
 
+    PARTICIPANT_EMOJI = {
+        "FII": "🌍",
+        "DII": "🏛",
+        "PRO": "💼",
+        "CLIENT": "👤"
+    }
+
     @staticmethod
     def interpret_futures(net_position: int) -> Dict[str, str]:
         if net_position > 1000:
@@ -535,6 +543,7 @@ class SentimentAnalyzer:
             overall = "Neutral/Mixed"
 
         return ParticipantAnalysis(
+            emoji=cls.PARTICIPANT_EMOJI.get(data.category, data.category),
             category=cls.PARTICIPANT_NAMES.get(data.category, data.category),
             symbol=data.category,
             futures=FuturesAnalysis(
@@ -726,16 +735,13 @@ def format_compact_message(data: DashboardResponse) -> str:
     lines.append("")
     
     for p in data.participants:
-        emoji = "🟢" if p.overall_sentiment == "Bullish" else "🔴" if p.overall_sentiment == "Bearish" else "⚪"
-        
-        lines.append(f"{emoji} *{p.category}* ({p.overall_sentiment})")
-        lines.append(f" ├ 📈 *Futures:* `{p.futures.net:+d}`")
-        lines.append(f" ├ 📞 *Calls:* `{p.calls.net:+d}`")
-        lines.append(f" └ 📉 *Puts:* `{p.puts.net:+d}`")
+        lines.append(f"{p.emoji} *{p.category}*")
+        lines.append(f" ├ 📈 *Futures:* `{p.futures.net:+d}` ({p.futures.trend})")
+        lines.append(f" ├ 📞 *Calls:* `{p.calls.net:+d}` ({p.calls.trend})")
+        lines.append(f" └ 📉 *Puts:* `{p.puts.net:+d}` ({p.puts.trend})")
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🏛️ *FII:* {summary.fii_sentiment} | *DII:* {summary.dii_sentiment}")
     lines.append(f"🤖 _Source: NSE India | Analyzed via Python_")
 
     return "\n".join(lines)
