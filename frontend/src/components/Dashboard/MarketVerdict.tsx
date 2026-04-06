@@ -6,6 +6,7 @@ import {
     ArrowDownRight,
     Minus,
     Eye,
+    Scale,
 } from 'lucide-react'
 import { cn, PARTICIPANT_META } from '@/lib/utils'
 import type { DashboardData, ParticipantSymbol } from '@/types'
@@ -14,12 +15,22 @@ interface MarketVerdictProps {
     data: DashboardData
 }
 
+const WEIGHT_LABELS: Record<string, string> = {
+    FII: '🌍 FII (40%)',
+    DII: '🏛 DII (25%)',
+    PRO: '💼 PRO (20%)',
+    CLIENT: '👤 Retail (15%)',
+}
+
 export function MarketVerdict({ data }: MarketVerdictProps) {
     const { market_summary, participants } = data
     const sentiment = market_summary.overall_sentiment
+    const ws = market_summary.weighted_score
+    const breakdown = market_summary.score_breakdown
 
-    const isOptimistic = sentiment.includes('Optimistic')
-    const isCautious = sentiment.includes('Cautious')
+    const isBullish = ws >= 0.5
+    const isBearish = ws <= -0.5
+    const isMixed = !isBullish && !isBearish
 
     // Find FII and DII for contrast
     const fii = participants.find((p) => p.symbol === 'FII')
@@ -40,7 +51,7 @@ export function MarketVerdict({ data }: MarketVerdictProps) {
                 <div>
                     <h2 className="text-base font-semibold text-white">Market-Wide Sentiment Verdict</h2>
                     <p className="text-xs text-surface-400">
-                        Aggregated analysis across all participant categories
+                        Weighted composite analysis across all participant categories
                     </p>
                 </div>
             </div>
@@ -53,15 +64,15 @@ export function MarketVerdict({ data }: MarketVerdictProps) {
                     transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
                     className={cn(
                         'rounded-xl p-5 border',
-                        isOptimistic && 'bg-bullish-500/[0.08] border-bullish-500/20',
-                        isCautious && 'bg-bearish-500/[0.08] border-bearish-500/20',
-                        !isOptimistic && !isCautious && 'bg-neutral-500/[0.08] border-neutral-500/20',
+                        isBullish && 'bg-bullish-500/[0.08] border-bullish-500/20',
+                        isBearish && 'bg-bearish-500/[0.08] border-bearish-500/20',
+                        isMixed && 'bg-neutral-500/[0.08] border-neutral-500/20',
                     )}
                 >
                     <div className="flex items-center gap-3 mb-2">
-                        {isOptimistic ? (
+                        {isBullish ? (
                             <ArrowUpRight className="w-6 h-6 text-bullish-400" />
-                        ) : isCautious ? (
+                        ) : isBearish ? (
                             <ArrowDownRight className="w-6 h-6 text-bearish-400" />
                         ) : (
                             <Minus className="w-6 h-6 text-neutral-400" />
@@ -69,16 +80,57 @@ export function MarketVerdict({ data }: MarketVerdictProps) {
                         <h3
                             className={cn(
                                 'text-xl font-bold',
-                                isOptimistic && 'text-bullish-400',
-                                isCautious && 'text-bearish-400',
-                                !isOptimistic && !isCautious && 'text-neutral-400',
+                                isBullish && 'text-bullish-400',
+                                isBearish && 'text-bearish-400',
+                                isMixed && 'text-neutral-400',
                             )}
                         >
-                            Market Sentiment: {isOptimistic ? 'Optimistic' : isCautious ? 'Cautious' : 'Mixed'}
+                            Weighted Score: {ws >= 0 ? '+' : ''}{ws.toFixed(2)}
                         </h3>
+                        {market_summary.contrarian_retail && (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                                Contrarian Retail
+                            </span>
+                        )}
                     </div>
                     <p className="text-sm text-surface-300 leading-relaxed">{sentiment}</p>
                 </motion.div>
+
+                {/* Score Breakdown */}
+                <div className="space-y-3">
+                    <div className="flex items-center gap-2 mb-3">
+                        <Scale className="w-4 h-4 text-accent-400" />
+                        <h3 className="text-sm font-semibold text-white">Weighted Contribution</h3>
+                    </div>
+
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        {(['FII', 'DII', 'PRO', 'CLIENT'] as const).map((sym) => {
+                            const contrib = breakdown[sym] ?? 0
+                            const isPos = contrib >= 0
+                            return (
+                                <div
+                                    key={sym}
+                                    className={cn(
+                                        'rounded-xl border p-3 text-center space-y-1',
+                                        isPos
+                                            ? 'border-bullish-500/15 bg-bullish-500/[0.04]'
+                                            : 'border-bearish-500/15 bg-bearish-500/[0.04]',
+                                    )}
+                                >
+                                    <p className="text-xs text-surface-400 font-medium">{WEIGHT_LABELS[sym]}</p>
+                                    <p
+                                        className={cn(
+                                            'text-lg font-bold font-mono',
+                                            isPos ? 'text-bullish-400' : 'text-bearish-400',
+                                        )}
+                                    >
+                                        {isPos ? '+' : ''}{contrib.toFixed(2)}
+                                    </p>
+                                </div>
+                            )
+                        })}
+                    </div>
+                </div>
 
                 {/* Key Observations */}
                 <div className="space-y-3">
@@ -150,7 +202,7 @@ export function MarketVerdict({ data }: MarketVerdictProps) {
                             const meta = PARTICIPANT_META[p.symbol as ParticipantSymbol]
                             const maxScore = 4
                             const normalized = ((p.sentiment_score + maxScore) / (maxScore * 2)) * 100
-                            const isBullish = p.sentiment_score > 0
+                            const isBull = p.sentiment_score > 0
 
                             return (
                                 <div key={p.symbol} className="flex items-center gap-3">
@@ -165,7 +217,7 @@ export function MarketVerdict({ data }: MarketVerdictProps) {
                                             transition={{ duration: 0.8, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
                                             className={cn(
                                                 'h-full rounded-full',
-                                                isBullish
+                                                isBull
                                                     ? 'bg-gradient-to-r from-bullish-600 to-bullish-400'
                                                     : 'bg-gradient-to-r from-bearish-600 to-bearish-400',
                                             )}
@@ -174,7 +226,7 @@ export function MarketVerdict({ data }: MarketVerdictProps) {
                                     <span
                                         className={cn(
                                             'w-10 text-right text-xs font-mono font-semibold',
-                                            isBullish ? 'text-bullish-400' : 'text-bearish-400',
+                                            isBull ? 'text-bullish-400' : 'text-bearish-400',
                                         )}
                                     >
                                         {p.sentiment_score > 0 ? '+' : ''}

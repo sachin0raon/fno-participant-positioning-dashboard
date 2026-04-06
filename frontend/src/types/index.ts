@@ -31,10 +31,13 @@ export interface MarketSummary {
   bearish_count: number
   neutral_count: number
   overall_sentiment: string
+  weighted_score: number
+  score_breakdown: Record<string, number>
   most_bullish: string
   most_bearish: string
   fii_sentiment: string
   dii_sentiment: string
+  contrarian_retail: boolean
 }
 
 export interface DashboardData {

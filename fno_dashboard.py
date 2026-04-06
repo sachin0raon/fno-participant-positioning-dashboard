@@ -7,6 +7,7 @@ Data source: National Stock Exchange of India (NSE)
 import logging
 import os
 import json
+import math
 import asyncio
 from pathlib import Path
 from functools import lru_cache
@@ -23,8 +24,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from telegram import Update, BotCommand
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
 
@@ -169,10 +170,13 @@ class MarketSummary(BaseModel):
     bearish_count: int
     neutral_count: int
     overall_sentiment: str
+    weighted_score: float
+    score_breakdown: Dict[str, float]
     most_bullish: str
     most_bearish: str
     fii_sentiment: str
     dii_sentiment: str
+    contrarian_retail: bool = False
 
 
 class DashboardResponse(BaseModel):
@@ -584,6 +588,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or None
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip() or None
 TELEGRAM_CRON_SCHEDULE = os.getenv("TELEGRAM_CRON_SCHEDULE", "0 16 * * 1-5")
 TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+TELEGRAM_CONTRARIAN_RETAIL = False  # Runtime toggle for contrarian retail mode
 
 
 # ─── API Routes ────────────────────────────────────────────────────
@@ -626,7 +631,55 @@ async def get_available_dates():
     return dates
 
 
-async def _fetch_and_analyze_data(date: str) -> Optional[DashboardResponse]:
+# ─── Weighted Sentiment Engine ─────────────────────────────────────
+PARTICIPANT_WEIGHTS: Dict[str, float] = {
+    "FII": 0.40,
+    "DII": 0.25,
+    "PRO": 0.20,
+    "CLIENT": 0.15,
+}
+
+def compute_weighted_sentiment(
+    participants: List[ParticipantAnalysis],
+    contrarian_retail: bool = False,
+) -> tuple[float, Dict[str, float], str]:
+    """
+    Compute a weighted composite sentiment score.
+    Returns (weighted_score, score_breakdown_dict, overall_label).
+    """
+    breakdown: Dict[str, float] = {}
+    weighted_score = 0.0
+
+    for p in participants:
+        weight = PARTICIPANT_WEIGHTS.get(p.symbol, 0.0)
+        raw_score = p.sentiment_score
+
+        # Contrarian: invert retail score
+        if contrarian_retail and p.symbol == "CLIENT":
+            raw_score = -raw_score
+
+        contribution = weight * raw_score
+        breakdown[p.symbol] = round(contribution, 2)
+        weighted_score += contribution
+
+    weighted_score = round(weighted_score, 2)
+
+    # Determine label from thresholds
+    if weighted_score >= 1.5:
+        label = "Strongly Bullish – Broad institutional buying"
+    elif weighted_score >= 0.5:
+        label = "Moderately Bullish – Leaning bullish"
+    elif weighted_score > -0.5:
+        label = "Mixed – No clear directional consensus"
+    elif weighted_score > -1.5:
+        label = "Moderately Bearish – Leaning bearish"
+    else:
+        label = "Strongly Bearish – Broad institutional selling"
+
+    return weighted_score, breakdown, label
+
+
+async def _fetch_and_analyze_data(date: str, contrarian_retail: bool = False) -> Optional[DashboardResponse]:
     """Internal helper to fetch data, analyze it and format response"""
     data = await fetcher.get_participant_oi_data(date)
 
@@ -636,7 +689,7 @@ async def _fetch_and_analyze_data(date: str) -> Optional[DashboardResponse]:
     # Analyze all participants
     participants = [analyzer.analyze_participant(d) for d in data]
 
-    # Market summary
+    # Market summary – counts still useful for cards
     bull_count = sum(1 for p in participants if p.overall_sentiment == "Bullish")
     bear_count = sum(1 for p in participants if p.overall_sentiment == "Bearish")
     neutral_count = len(participants) - bull_count - bear_count
@@ -648,12 +701,10 @@ async def _fetch_and_analyze_data(date: str) -> Optional[DashboardResponse]:
     fii = next((p for p in participants if p.symbol == "FII"), None)
     dii = next((p for p in participants if p.symbol == "DII"), None)
 
-    if bull_count > bear_count:
-        overall = "Optimistic – Majority bullish positioning"
-    elif bear_count > bull_count:
-        overall = "Cautious – Majority bearish/protective positioning"
-    else:
-        overall = "Mixed – No clear consensus"
+    # Weighted composite sentiment (replaces simple headcount)
+    weighted_score, breakdown, overall = compute_weighted_sentiment(
+        participants, contrarian_retail=contrarian_retail
+    )
 
     return DashboardResponse(
         date=date,
@@ -663,10 +714,13 @@ async def _fetch_and_analyze_data(date: str) -> Optional[DashboardResponse]:
             bearish_count=bear_count,
             neutral_count=neutral_count,
             overall_sentiment=overall,
+            weighted_score=weighted_score,
+            score_breakdown=breakdown,
             most_bullish=most_bullish,
             most_bearish=most_bearish,
             fii_sentiment=fii.overall_sentiment if fii else "N/A",
             dii_sentiment=dii.overall_sentiment if dii else "N/A",
+            contrarian_retail=contrarian_retail,
         )
     )
 
@@ -674,6 +728,7 @@ async def _fetch_and_analyze_data(date: str) -> Optional[DashboardResponse]:
 @app.get("/api/fno-data", response_model=Union[DashboardResponse, MarketStatusInfo])
 async def get_fno_data(
     date: str = Query(..., description="Date in DD-MM-YYYY format"),
+    contrarian_retail: bool = Query(False, description="Treat retail as contrarian indicator"),
 ):
     """Fetch F&O participant data for a given trading date"""
     # Validate date format
@@ -704,7 +759,7 @@ async def get_fno_data(
             )
 
     # 3. Fetch data
-    response = await _fetch_and_analyze_data(date)
+    response = await _fetch_and_analyze_data(date, contrarian_retail=contrarian_retail)
     if not response:
         # Check if it was a holiday but fetcher didn't know (fallback)
         raise HTTPException(status_code=404, detail=f"No data available for {date}. Please ensure it was a trading day.")
@@ -716,13 +771,31 @@ async def get_fno_data(
 def format_compact_message(data: DashboardResponse) -> str:
     """Generate a rich premium formatted message for Telegram"""
     lines = []
-    lines.append("🏦 *F&O PARTICIPANT POSITIONING* 🏦")
+    lines.append("🏦 *F&O PARTICIPANT POSITIONING*")
     lines.append(f"📅 *Date:* `{data.date}`")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     
     # Market summary
     summary = data.market_summary
-    lines.append(f"🌐 *MARKET SENTIMENT:* {summary.overall_sentiment}")
+
+    # Weighted sentiment badge
+    ws = summary.weighted_score
+    if ws >= 1.5:
+        score_emoji = "🟢🟢"
+    elif ws >= 0.5:
+        score_emoji = "🟢"
+    elif ws > -0.5:
+        score_emoji = "⚪"
+    elif ws > -1.5:
+        score_emoji = "🔴"
+    else:
+        score_emoji = "🔴🔴"
+
+    lines.append(f"{score_emoji} *MARKET SENTIMENT:* *{summary.overall_sentiment}*")
+
+    if summary.contrarian_retail:
+        lines.append("🔄 _Contrarian retail mode enabled_")
+
     lines.append(f"🐂 {summary.bullish_count} Bullish | 🐻 {summary.bearish_count} Bearish | ⚪ {summary.neutral_count} Neutral")
     lines.append("")
     lines.append(f"🏆 *LEADERS:*")
@@ -742,12 +815,12 @@ def format_compact_message(data: DashboardResponse) -> str:
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🤖 _Source: NSE India | Analyzed via Python_")
+    lines.append(f"🤖 _Source: NSE India | Weighted Composite Analysis_")
 
     return "\n".join(lines)
 
 
-async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bool = False, header: str = "", smart_fallback: bool = False):
+async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bool = False, header: str = "", smart_fallback: bool = False, contrarian_retail: bool = False):
     """Send dashboard report to a specific chat"""
     if not hasattr(app.state, "telegram_app"):
         logger.warning("Telegram app not initialized")
@@ -768,7 +841,7 @@ async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bo
                 holiday_desc = fetcher.get_holiday_description(target_date)
                 fallback_header = f"ℹ️ *Market is Closed* ({target_date} - {holiday_desc})\nShowing latest available report (*{prev_date_str}*):\n\n"
                 # Call again with the previous trading day, disable fallback to avoid infinite loops
-                return await send_dashboard_message(chat_id, prev_date_str, header=fallback_header, smart_fallback=False)
+                return await send_dashboard_message(chat_id, prev_date_str, header=fallback_header, smart_fallback=False, contrarian_retail=contrarian_retail)
 
             holiday_desc = fetcher.get_holiday_description(target_date) or "Market Holiday"
             await app.state.telegram_app.bot.send_message(
@@ -782,8 +855,8 @@ async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bo
         pass
 
     # 2. Data Fetching
-    logger.info(f"Fetching dashboard for {target_date} (smart_fallback={smart_fallback})")
-    data = await _fetch_and_analyze_data(target_date)
+    logger.info(f"Fetching dashboard for {target_date} (smart_fallback={smart_fallback}, contrarian_retail={contrarian_retail})")
+    data = await _fetch_and_analyze_data(target_date, contrarian_retail=contrarian_retail)
 
     if data:
         message = header + format_compact_message(data)
@@ -797,7 +870,7 @@ async def send_dashboard_message(chat_id: str, date: str = None, silent_skip: bo
         prev_date_str = fetcher.get_previous_trading_day(target_date)
         fallback_header = f"ℹ️ *Today's data is not yet available* ({target_date})\nShowing latest available report (*{prev_date_str}*):\n\n"
         logger.info(f"Data not available for {target_date}, falling back to {prev_date_str}")
-        return await send_dashboard_message(chat_id, prev_date_str, header=fallback_header, smart_fallback=False)
+        return await send_dashboard_message(chat_id, prev_date_str, header=fallback_header, smart_fallback=False, contrarian_retail=contrarian_retail)
     else:
         # Final failure message if no fallback or fallback also failed
         try:
@@ -821,6 +894,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Available commands:\n"
         "/recent - Get latest report\n"
         "/date DD-MM-YYYY - Get report for specific date\n"
+        "/contrarian - Toggle contrarian retail mode\n"
         "/cron - Show/update schedule\n"
         "/help - Show this help message",
         parse_mode="Markdown"
@@ -837,7 +911,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Commands:*\n"
         "/recent - Get latest F&O report\n"
         "/date `DD-MM-YYYY` - Get report for a specific date\n"
-        "Example: `/date 14-03-2026`\n\n"
+        "Example: `/date 14-03-2026`\n"
+        "/contrarian - Toggle contrarian retail mode\n\n"
         "*Utilities:*\n"
         "/status - Check bot health & cache stats\n"
         "/cron - Show current schedule\n"
@@ -854,7 +929,7 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = str(update.message.chat_id)
-    await send_dashboard_message(chat_id, smart_fallback=True)
+    await send_dashboard_message(chat_id, smart_fallback=True, contrarian_retail=TELEGRAM_CONTRARIAN_RETAIL)
 
 
 async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -877,7 +952,7 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Invalid date format. Use DD-MM-YYYY\nExample: /date 14-03-2026")
         return
 
-    data = await _fetch_and_analyze_data(date_arg)
+    data = await _fetch_and_analyze_data(date_arg, contrarian_retail=TELEGRAM_CONTRARIAN_RETAIL)
     if data:
         message = format_compact_message(data)
         await update.message.reply_text(message, parse_mode="Markdown")
@@ -969,6 +1044,60 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def contrarian_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /contrarian command – show toggle button"""
+    if TELEGRAM_CHAT_ID and str(update.message.chat_id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    status_text = "✅ ON" if TELEGRAM_CONTRARIAN_RETAIL else "❌ OFF"
+    new_state = "off" if TELEGRAM_CONTRARIAN_RETAIL else "on"
+    button_label = "Turn OFF" if TELEGRAM_CONTRARIAN_RETAIL else "Turn ON"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🔄 {button_label}", callback_data=f"contrarian_{new_state}")]
+    ])
+
+    await update.message.reply_text(
+        f"📊 *Contrarian Retail Mode*\n\n"
+        f"Current Status: *{status_text}*\n\n"
+        f"When enabled, the retail (CLIENT) sentiment score is *inverted* in the weighted calculation.\n"
+        f"This treats retail positioning as a contrarian indicator – a common professional F&O analysis technique.",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+
+async def contrarian_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline button clicks for contrarian toggle"""
+    global TELEGRAM_CONTRARIAN_RETAIL
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "contrarian_on":
+        TELEGRAM_CONTRARIAN_RETAIL = True
+    elif query.data == "contrarian_off":
+        TELEGRAM_CONTRARIAN_RETAIL = False
+    else:
+        return
+
+    status_text = "✅ ON" if TELEGRAM_CONTRARIAN_RETAIL else "❌ OFF"
+    new_state = "off" if TELEGRAM_CONTRARIAN_RETAIL else "on"
+    button_label = "Turn OFF" if TELEGRAM_CONTRARIAN_RETAIL else "Turn ON"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🔄 {button_label}", callback_data=f"contrarian_{new_state}")]
+    ])
+
+    await query.edit_message_text(
+        f"📊 *Contrarian Retail Mode*\n\n"
+        f"Current Status: *{status_text}*\n\n"
+        f"When enabled, the retail (CLIENT) sentiment score is *inverted* in the weighted calculation.\n"
+        f"This treats retail positioning as a contrarian indicator – a common professional F&O analysis technique.",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     from telegram.error import RetryAfter
@@ -996,8 +1125,10 @@ async def setup_telegram_bot(fastapi_app: FastAPI):
     telegram_app.add_handler(CommandHandler("help", help_command))
     telegram_app.add_handler(CommandHandler("recent", recent_command))
     telegram_app.add_handler(CommandHandler("date", date_command))
+    telegram_app.add_handler(CommandHandler("contrarian", contrarian_command))
     telegram_app.add_handler(CommandHandler("cron", cron_command))
     telegram_app.add_handler(CommandHandler("status", status_command))
+    telegram_app.add_handler(CallbackQueryHandler(contrarian_callback_handler, pattern=r"^contrarian_"))
     telegram_app.add_error_handler(error_handler)
     
     # Store app
@@ -1007,6 +1138,7 @@ async def setup_telegram_bot(fastapi_app: FastAPI):
     commands = [
         BotCommand("recent", "Get latest F&O participant report"),
         BotCommand("date", "Get report for specific date (DD-MM-YYYY)"),
+        BotCommand("contrarian", "Toggle contrarian retail mode"),
         BotCommand("cron", "Show or update the automated schedule"),
         BotCommand("status", "Check bot health and next run time"),
         BotCommand("help", "Show all available commands"),

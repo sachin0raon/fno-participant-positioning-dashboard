@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { motion, AnimatePresence, Variants } from 'framer-motion'
-import { RefreshCw, AlertTriangle } from 'lucide-react'
+import { RefreshCw, AlertTriangle, ToggleLeft, ToggleRight } from 'lucide-react'
 import { useDashboardData, useAvailableDates, useRefreshDashboard } from '@/hooks/useFNOData'
 import { DateSelector } from '@/components/Dashboard/DateSelector'
 import { SentimentOverview } from '@/components/Dashboard/SentimentOverview'
@@ -10,6 +10,7 @@ import { MarketVerdict } from '@/components/Dashboard/MarketVerdict'
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
 import { ErrorFallback } from '@/components/ui/ErrorFallback'
 import { Coffee, Clock } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 
 
@@ -29,6 +30,7 @@ const itemVariants: Variants = {
 export default function Dashboard() {
     const { data: dates } = useAvailableDates()
     const [selectedDate, setSelectedDate] = useState('')
+    const [contrarianRetail, setContrarianRetail] = useState(false)
 
     const effectiveDate = selectedDate || dates?.[0]?.value || ''
 
@@ -39,7 +41,7 @@ export default function Dashboard() {
         error,
         isFetching,
         refetch,
-    } = useDashboardData(effectiveDate)
+    } = useDashboardData(effectiveDate, contrarianRetail)
 
     const refreshDashboard = useRefreshDashboard()
 
@@ -51,9 +53,13 @@ export default function Dashboard() {
         setSelectedDate(date)
     }, [])
 
+    const handleContrarianToggle = useCallback(() => {
+        setContrarianRetail(prev => !prev)
+    }, [])
+
     return (
         <div className="space-y-6">
-            {/* ─── Top Bar: Date selector + refresh ─── */}
+            {/* ─── Top Bar: Date selector + contrarian toggle + refresh ─── */}
             <motion.div
                 initial={{ opacity: 0, y: -10 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -66,6 +72,27 @@ export default function Dashboard() {
                 />
 
                 <div className="flex items-center gap-3">
+                    {/* Contrarian Retail Toggle */}
+                    <motion.button
+                        id="contrarian-toggle"
+                        whileHover={{ scale: 1.03 }}
+                        whileTap={{ scale: 0.97 }}
+                        onClick={handleContrarianToggle}
+                        className={cn(
+                            'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200 border',
+                            contrarianRetail
+                                ? 'bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/30 text-amber-400'
+                                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.08] text-surface-400'
+                        )}
+                    >
+                        {contrarianRetail ? (
+                            <ToggleRight className="w-5 h-5 text-amber-400" />
+                        ) : (
+                            <ToggleLeft className="w-5 h-5 text-surface-500" />
+                        )}
+                        <span className="hidden sm:inline">Contrarian Retail</span>
+                        <span className="sm:hidden">CR</span>
+                    </motion.button>
 
                     <motion.button
                         whileHover={{ scale: 1.05 }}
@@ -141,7 +168,7 @@ export default function Dashboard() {
                     </motion.div>
                 ) : dashboardData && 'participants' in dashboardData ? (
                     <motion.div
-                        key={`data-${dashboardData.date}`}
+                        key={`data-${dashboardData.date}-${contrarianRetail}`}
                         variants={containerVariants}
                         initial="hidden"
                         animate="visible"

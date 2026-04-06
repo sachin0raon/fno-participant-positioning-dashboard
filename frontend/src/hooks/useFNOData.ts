@@ -3,10 +3,10 @@ import { fetchDashboardData, fetchAvailableDates, fetchHealth } from '@/lib/api'
 import type { DashboardData, DateOption, DashboardResponse } from '@/types'
 import { useCallback } from 'react'
 
-export function useDashboardData(date: string) {
+export function useDashboardData(date: string, contrarianRetail: boolean = false) {
   return useQuery<DashboardResponse, Error>({
-    queryKey: ['fno-data', date],
-    queryFn: () => fetchDashboardData(date),
+    queryKey: ['fno-data', date, contrarianRetail],
+    queryFn: () => fetchDashboardData(date, contrarianRetail),
 
     enabled: !!date,
     staleTime: 5 * 60 * 1000,

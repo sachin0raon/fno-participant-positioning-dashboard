@@ -2,9 +2,16 @@ import type { DashboardData, DateOption, DashboardResponse } from '@/types'
 
 const API_BASE_URL = '/api'
 
-export async function fetchDashboardData(date: string): Promise<DashboardResponse> {
+export async function fetchDashboardData(
+  date: string,
+  contrarianRetail: boolean = false,
+): Promise<DashboardResponse> {
+  const params = new URLSearchParams({
+    date,
+    contrarian_retail: String(contrarianRetail),
+  })
 
-  const response = await fetch(`${API_BASE_URL}/fno-data?date=${encodeURIComponent(date)}`)
+  const response = await fetch(`${API_BASE_URL}/fno-data?${params}`)
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => response.statusText)
