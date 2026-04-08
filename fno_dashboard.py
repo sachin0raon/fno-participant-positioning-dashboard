@@ -319,38 +319,82 @@ class NSEFNODataFetcher:
             logger.warning(f"nselib failed for {date}: {e}. Falling back to manual fetch.")
 
         if df is None or df.empty:
-            # 3. Fallback to direct requests if nselib fails to fetch or returns empty DataFrame
+            # 3. Fallback: session-based fetch with full Akamai-bypass browser fingerprint.
+            #    Akamai blocks cloud IPs that send bare requests. To appear as a real
+            #    browser we: (a) open a session, (b) visit nseindia.com to acquire cookies,
+            #    (c) hit the archive URL with Referer/Origin/sec-fetch-* headers and the
+            #    session cookies. A retry with backoff handles transient 403s.
             try:
                 import requests
                 import io
+                import time
                 
                 dt_obj = datetime.strptime(date, "%d-%m-%Y")
                 date_str = dt_obj.strftime("%d%m%Y")
-                
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
+
+                session = requests.Session()
+                session.headers.update({
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;"
+                        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+                    ),
+                    "Accept-Language": "en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Referer": "https://www.nseindia.com/",
+                    "Origin": "https://www.nseindia.com",
                     "Connection": "keep-alive",
-                }
-                
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "same-site",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1",
+                    "DNT": "1",
+                    "Sec-CH-UA": "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"",
+                    "Sec-CH-UA-Mobile": "?0",
+                    "Sec-CH-UA-Platform": "\"Windows\"",
+                })
+
+                # Warm up session — visit NSE main page to pick up Akamai cookies
+                try:
+                    session.get("https://www.nseindia.com/", timeout=10)
+                except Exception:
+                    pass  # cookie acquisition is best-effort
+
                 urls = [
                     f"https://nsearchives.nseindia.com/content/nsccl/fao_participant_oi_{date_str}.csv",
-                    f"https://archives.nseindia.com/content/nsccl/fao_participant_oi_{date_str}.csv"
+                    f"https://archives.nseindia.com/content/nsccl/fao_participant_oi_{date_str}.csv",
                 ]
                 
                 for url in urls:
-                    logger.info(f"Fallback URL: {url}")
-                    try:
-                        # requests auto-negotiates HTTP/1.1 and naturally skips Akamai HTTP/2 blocks
-                        resp = requests.get(url, headers=headers, timeout=15)
-                        if resp.status_code == 200:
-                            df_fallback = pd.read_csv(io.BytesIO(resp.content), on_bad_lines='skip', skiprows=1)
-                            if not df_fallback.empty:
-                                df = df_fallback
-                                break
-                    except Exception as req_e:
-                        logger.warning(f"Fallback request failed for {url}: {req_e}")
+                    # Retry each URL up to 2 times with a short backoff
+                    for attempt in range(2):
+                        logger.info(f"Fallback URL (attempt {attempt+1}): {url}")
+                        try:
+                            resp = session.get(url, timeout=20, allow_redirects=True)
+                            if resp.status_code == 200 and len(resp.content) > 100:
+                                df_fallback = pd.read_csv(
+                                    io.BytesIO(resp.content), on_bad_lines='skip', skiprows=1
+                                )
+                                if not df_fallback.empty:
+                                    df = df_fallback
+                                    break
+                            elif resp.status_code == 403:
+                                logger.warning(
+                                    f"403 on {url} — Akamai cloud IP block likely. "
+                                    f"Retrying after backoff..."
+                                )
+                                time.sleep(1.5 * (attempt + 1))
+                            else:
+                                break  # 404 or other status, no point retrying
+                        except Exception as req_e:
+                            logger.warning(f"Fallback request failed for {url}: {req_e}")
+                    if df is not None and not df.empty:
+                        break
             except Exception as e:
                 logger.error(f"NSE API Fallback Error for {date}: {e}")
 
