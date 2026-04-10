@@ -30,7 +30,13 @@ const itemVariants: Variants = {
 export default function Dashboard() {
     const { data: dates } = useAvailableDates()
     const [selectedDate, setSelectedDate] = useState('')
-    const [contrarianRetail, setContrarianRetail] = useState(false)
+    const [contrarianRetail, setContrarianRetail] = useState(() => {
+        try {
+            return localStorage.getItem('fno_contrarian_retail') === 'true'
+        } catch {
+            return false
+        }
+    })
 
     const effectiveDate = selectedDate || dates?.[0]?.value || ''
 
@@ -54,7 +60,11 @@ export default function Dashboard() {
     }, [])
 
     const handleContrarianToggle = useCallback(() => {
-        setContrarianRetail(prev => !prev)
+        setContrarianRetail(prev => {
+            const next = !prev
+            try { localStorage.setItem('fno_contrarian_retail', String(next)) } catch { /* ignore */ }
+            return next
+        })
     }, [])
 
     return (

@@ -10,7 +10,6 @@ import json
 import math
 import asyncio
 from pathlib import Path
-from functools import lru_cache
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, asdict
@@ -298,7 +297,6 @@ class NSEFNODataFetcher:
         except Exception as e:
             logger.error(f"Cache Write Error ({date}): {e}")
 
-    @lru_cache(maxsize=100)
     def _fetch_raw_nse_data(self, date: str) -> Optional[List[ParticipantData]]:
         """
         Fetch participant-wise open interest.
